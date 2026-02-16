@@ -14,9 +14,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-// Token used for authenticated release operations directly from this plugin context.
-if (!defined('FEATHERLITE_MEDIA_TOKEN')) {
-    define('FEATHERLITE_MEDIA_TOKEN', 'IUABDIUSAIUDASUBDAUSIDBUSDNMASBDUYQWPO');
+// Load release token from dedicated include to keep bootstrap lean.
+$release_token_file = __DIR__ . '/includes/release-token.php';
+if (file_exists($release_token_file)) {
+    require_once $release_token_file;
 }
 
 // Add cron schedule for every minute
