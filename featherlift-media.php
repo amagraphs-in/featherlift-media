@@ -3,7 +3,7 @@
  * Plugin Name: Enhanced S3 Media Upload with SQS
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.0
+ * Version: 1.0.2
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.0';
+    private $version = '1.0.2';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -58,9 +58,12 @@ class Enhanced_S3_Media_Upload {
     );
     private $bucket_autoname_strategy;
     private $preserve_bucket_permissions;
+    private $optimize_media;
+    private $offload_media;
     private $auto_resize_images;
     private $resize_max_width;
     private $resize_max_height;
+    private $default_resize_cap = 2560;
     private $ai_alt_enabled;
     private $ai_agent;
     private $ai_model;
@@ -138,9 +141,11 @@ class Enhanced_S3_Media_Upload {
         $this->tinypng_api_key = $this->get_option('tinypng_api_key', '');
         $this->bucket_autoname_strategy = $this->get_option('bucket_autoname_strategy', 'file');
         $this->preserve_bucket_permissions = (bool) $this->get_option('preserve_bucket_permissions', true);
+        $this->optimize_media = (bool) $this->get_option('optimize_media', true);
+        $this->offload_media = (bool) $this->get_option('offload_media', true);
         $this->auto_resize_images = (bool) $this->get_option('auto_resize_images', false);
-        $this->resize_max_width = intval($this->get_option('resize_max_width', 2048));
-        $this->resize_max_height = intval($this->get_option('resize_max_height', 2048));
+        $this->resize_max_width = intval($this->get_option('resize_max_width', $this->default_resize_cap));
+        $this->resize_max_height = intval($this->get_option('resize_max_height', $this->default_resize_cap));
         $this->ai_alt_enabled = (bool) $this->get_option('ai_alt_enabled', false);
         $this->ai_agent = $this->get_option('ai_agent', 'openai');
         $this->ai_model = $this->get_option('ai_model', 'gpt-4o-mini');
@@ -576,150 +581,110 @@ class Enhanced_S3_Media_Upload {
      */
     public function register_settings() {
         register_setting('enhanced_s3_settings_group', 'enhanced_s3_settings', array($this, 'sanitize_settings'));
-        
+
         add_settings_section(
-            'enhanced_s3_aws_section',
-            'AWS Configuration',
-            array($this, 'aws_section_callback'),
+            'enhanced_s3_intent_section',
+            'Media Workflow Intent',
+            array($this, 'intent_section_callback'),
             'enhanced-s3-settings'
         );
-        
+
+        add_settings_field(
+            'optimize_media',
+            'Optimize media before delivery',
+            array($this, 'optimize_media_field'),
+            'enhanced-s3-settings',
+            'enhanced_s3_intent_section'
+        );
+
+        add_settings_field(
+            'offload_media',
+            'Host media on external storage/CDN',
+            array($this, 'offload_media_field'),
+            'enhanced-s3-settings',
+            'enhanced_s3_intent_section'
+        );
+
         add_settings_section(
-            'enhanced_s3_options_section',
-            'Upload Options',
-            array($this, 'options_section_callback'),
+            'enhanced_s3_optimize_section',
+            'Optimize & Resize',
+            array($this, 'optimize_section_callback'),
             'enhanced-s3-settings'
         );
-        
-        // AWS Settings Fields
-        $aws_fields = array(
-            'access_key' => 'AWS Access Key',
-            'secret_key' => 'AWS Secret Key',
-            'region' => 'AWS Region'
+
+        $optimize_fields = array(
+            'auto_resize_images'   => 'Enable resizing rules',
+            'resize_max_width'     => 'Max width (px)',
+            'resize_max_height'    => 'Max height (px)',
+            'compress_images'      => 'Enable compression service',
+            'compression_service'  => 'Preferred optimizer',
+            'compression_quality'  => 'Native quality',
+            'tinypng_api_key'      => 'TinyPNG API key'
         );
-        
-        foreach ($aws_fields as $field => $label) {
+
+        foreach ($optimize_fields as $field => $label) {
             add_settings_field(
                 $field,
                 $label,
                 array($this, $field . '_field'),
                 'enhanced-s3-settings',
-                'enhanced_s3_aws_section'
-            );
-        }
-        
-        // Options Fields
-        $option_fields = array(
-            'use_cloudfront' => 'Enable CloudFront',
-            'upload_thumbnails' => 'Upload Thumbnails',
-            'auto_delete_local' => 'Auto-delete Local Files'
-        );
-        
-        foreach ($option_fields as $field => $label) {
-            add_settings_field(
-                $field,
-                $label,
-                array($this, $field . '_field'),
-                'enhanced-s3-settings',
-                'enhanced_s3_options_section'
+                'enhanced_s3_optimize_section'
             );
         }
 
         add_settings_section(
-            'enhanced_s3_compression_section',
-            'Image Compression',
-            array($this, 'compression_section_callback'),
+            'enhanced_s3_offload_section',
+            'External Storage & CDN',
+            array($this, 'offload_section_callback'),
             'enhanced-s3-settings'
         );
-        
-        $compression_fields = array(
-            'compress_images' => 'Enable Image Compression',
-            'compression_service' => 'Compression Service',
-            'compression_quality' => 'Compression Quality',
-            'tinypng_api_key' => 'TinyPNG API Key'
+
+        $offload_fields = array(
+            'access_key'                => 'AWS Access Key',
+            'secret_key'                => 'AWS Secret Key',
+            'region'                    => 'AWS Region',
+            'bucket_name'               => 'Bucket name',
+            'bucket_autoname_strategy'  => 'Bucket naming strategy',
+            's3_prefix'                 => 'Upload prefix',
+            'preserve_bucket_permissions' => 'Bucket permission strategy',
+            'use_cloudfront'            => 'Enable CloudFront CDN',
+            'cloudfront_domain'         => 'CloudFront domain (manual)',
+            'cloudfront_distribution_id'=> 'CloudFront distribution ID',
+            'upload_thumbnails'         => 'Upload generated thumbnail sizes',
+            'auto_delete_local'         => 'Remove local copies after upload'
         );
-        
-        foreach ($compression_fields as $field => $label) {
+
+        foreach ($offload_fields as $field => $label) {
             add_settings_field(
                 $field,
                 $label,
                 array($this, $field . '_field'),
                 'enhanced-s3-settings',
-                'enhanced_s3_compression_section'
+                'enhanced_s3_offload_section'
             );
         }
+
+        add_settings_section(
+            'enhanced_s3_automation_section',
+            'Automation & Workflow',
+            array($this, 'automation_section_callback'),
+            'enhanced-s3-settings'
+        );
 
         add_settings_field(
             'auto_upload_new_files',
-            'Auto-Upload New Files',
+            'Automatically process future uploads',
             array($this, 'auto_upload_new_files_field'),
             'enhanced-s3-settings',
-            'enhanced_s3_options_section'
+            'enhanced_s3_automation_section'
         );
-        
-        // ADD THIS NEW FIELD HERE:
+
         add_settings_field(
             'auto_upload_file_types',
-            'Auto-Upload File Types',
+            'File types to include',
             array($this, 'auto_upload_file_types_field'),
             'enhanced-s3-settings',
-            'enhanced_s3_options_section'
-        );
-
-
-        add_settings_field(
-            'bucket_name',
-            'S3 Bucket Name (Optional)',
-            array($this, 'bucket_name_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_aws_section'
-        );
-
-        add_settings_field(
-            'bucket_autoname_strategy',
-            'Bucket Naming',
-            array($this, 'bucket_autoname_strategy_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_aws_section'
-        );
-
-        add_settings_field(
-            'preserve_bucket_permissions',
-            'Preserve Bucket Permissions',
-            array($this, 'preserve_bucket_permissions_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_aws_section'
-        );
-
-        add_settings_section(
-            'enhanced_s3_resize_section',
-            'Image Resizing',
-            array($this, 'resize_section_callback'),
-            'enhanced-s3-settings'
-        );
-
-        add_settings_field(
-            'auto_resize_images',
-            'Enable Resizing',
-            array($this, 'auto_resize_images_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_resize_section'
-        );
-
-        add_settings_field(
-            'resize_max_width',
-            'Max Width (px)',
-            array($this, 'resize_max_width_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_resize_section'
-        );
-
-        add_settings_field(
-            'resize_max_height',
-            'Max Height (px)',
-            array($this, 'resize_max_height_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_resize_section'
+            'enhanced_s3_automation_section'
         );
 
         add_settings_section(
@@ -2166,6 +2131,10 @@ file_put_contents($temp_file, $test_content);
         $s3_key = get_post_meta($post->ID, 'enhanced_s3_key', true);
         $is_on_s3 = !empty($s3_key);
         $current_alt = get_post_meta($post->ID, '_wp_attachment_image_alt', true);
+        $attachment_description = wp_strip_all_tags(get_post_field('post_content', $post->ID));
+        $description_preview = $attachment_description !== ''
+            ? wp_trim_words($attachment_description, 35, '…')
+            : 'Not set';
         
         ob_start();
         ?>
@@ -2193,6 +2162,16 @@ file_put_contents($temp_file, $test_content);
                     <div class="enhanced-s3-alt-status" id="alt-status-<?php echo $post->ID; ?>" style="margin-top:8px;"></div>
                 </div>
             <?php endif; ?>
+            <hr />
+            <div class="enhanced-s3-description-preview">
+                <p><strong>Generated Description:</strong></p>
+                <p id="description-preview-<?php echo $post->ID; ?>" style="margin:4px 0 0;"><?php echo esc_html($description_preview); ?></p>
+                <?php if ($attachment_description !== ''): ?>
+                    <p class="description" style="margin-top:4px;">Full text lives inside the attachment description field.</p>
+                <?php else: ?>
+                    <p class="description" style="margin-top:4px;">Set a description on the attachment to see it here.</p>
+                <?php endif; ?>
+            </div>
         </div>
         <?php
         $html = ob_get_clean();
@@ -3072,6 +3051,22 @@ file_put_contents($temp_file, $test_content);
     }
     
     // Field callback methods
+    public function intent_section_callback() {
+        echo '<p>Select the workflow you want this plugin to automate. You can run optimization only, offload only, or chain both so every upload is compressed before landing on S3/CloudFront.</p>';
+    }
+
+    public function optimize_section_callback() {
+        echo '<p>Define how images are resized and which compression service (TinyPNG, ImageOptim, or native PHP) should run before files leave WordPress. Images wider than ' . absint($this->default_resize_cap) . 'px will be capped automatically.</p>';
+    }
+
+    public function offload_section_callback() {
+        echo '<p>Provide the credentials or manual endpoints needed to keep media on S3 and optionally accelerate through CloudFront. You can let the plugin auto-provision resources or plug in existing infrastructure.</p>';
+    }
+
+    public function automation_section_callback() {
+        echo '<p>Control which file types are processed automatically after upload so future content follows the same optimization/offload workflow.</p>';
+    }
+
     public function aws_section_callback() {
         echo '<p>Enter your AWS credentials to enable S3 integration.</p>';
     }
@@ -3167,6 +3162,36 @@ file_put_contents($temp_file, $test_content);
         $value = $this->get_option('preserve_bucket_permissions', true);
         echo '<label><input type="checkbox" name="enhanced_s3_settings[preserve_bucket_permissions]" value="1" ' . checked($value, true, false) . '> Keep existing S3 bucket policies untouched</label>';
         echo '<p class="description">Disable if you want the plugin to configure public read/CORS rules automatically.</p>';
+    }
+
+    public function optimize_media_field() {
+        $value = $this->get_option('optimize_media', true);
+        echo '<label><input type="checkbox" id="enhanced-s3-enable-optimization" name="enhanced_s3_settings[optimize_media]" value="1" ' . checked($value, true, false) . '> Optimize images (TinyPNG/ImageOptim/PHP + smart resize)</label>';
+        echo '<p class="description">Keeps originals safe but delivers slimmer assets. Required for TinyPNG + auto-resize workflows.</p>';
+    }
+
+    public function offload_media_field() {
+        $value = $this->get_option('offload_media', true);
+        echo '<label><input type="checkbox" id="enhanced-s3-enable-offload" name="enhanced_s3_settings[offload_media]" value="1" ' . checked($value, true, false) . '> Store media on Amazon S3 and optionally serve via CloudFront</label>';
+        echo '<p class="description">When enabled, uploads are moved off the web server and delivered from cloud storage/CDN.</p>';
+    }
+
+    public function s3_prefix_field() {
+        $value = trim($this->get_option('s3_prefix', 'wp-content/uploads/'));
+        echo '<input type="text" name="enhanced_s3_settings[s3_prefix]" value="' . esc_attr($value) . '" class="regular-text" placeholder="wp-content/uploads/">';
+        echo '<p class="description">Folder prefix inside your bucket. Defaults to <code>wp-content/uploads/</code>.</p>';
+    }
+
+    public function cloudfront_domain_field() {
+        $value = $this->get_option('cloudfront_domain', '');
+        echo '<input type="text" name="enhanced_s3_settings[cloudfront_domain]" value="' . esc_attr($value) . '" class="regular-text" placeholder="dxxxx.cloudfront.net">';
+        echo '<p class="description">Optional: point to an existing CloudFront distribution instead of provisioning a new one.</p>';
+    }
+
+    public function cloudfront_distribution_id_field() {
+        $value = $this->get_option('cloudfront_distribution_id', '');
+        echo '<input type="text" name="enhanced_s3_settings[cloudfront_distribution_id]" value="' . esc_attr($value) . '" class="regular-text" placeholder="E123ABC456">';
+        echo '<p class="description">Store the distribution ID if you plan to manage CloudFront manually.</p>';
     }
 
     public function use_cloudfront_field() {
