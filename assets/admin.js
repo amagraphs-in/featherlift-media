@@ -575,7 +575,6 @@
                 }
             });
         }
-        }
     };
 
     // Initialize when document is ready
