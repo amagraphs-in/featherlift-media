@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.5
+ * Version: 1.0.6
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.5';
+    private $version = '1.0.6';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -48,6 +48,11 @@ class Enhanced_S3_Media_Upload {
     private $sqs_queue_url;
     private $auto_delete_local;
     private $upload_thumbnails;
+    private $auto_upload_new_files;
+    private $compress_images;
+    private $compression_service;
+    private $compression_quality;
+    private $tinypng_api_key;
     private $sensitive_fields = array(
         'access_key',
         'secret_key',
@@ -2766,8 +2771,34 @@ file_put_contents($temp_file, $test_content);
     }
 
     private function get_encryption_key() {
-        $salt = wp_salt('secure_auth');
-        return hash('sha256', $salt, true);
+        if (function_exists('wp_salt')) {
+            $salt = wp_salt('secure_auth');
+        } else {
+            $candidates = array(
+                defined('SECURE_AUTH_SALT') ? SECURE_AUTH_SALT : '',
+                defined('AUTH_SALT') ? AUTH_SALT : '',
+                defined('LOGGED_IN_SALT') ? LOGGED_IN_SALT : '',
+                defined('NONCE_SALT') ? NONCE_SALT : '',
+                defined('SECURE_AUTH_KEY') ? SECURE_AUTH_KEY : '',
+                defined('AUTH_KEY') ? AUTH_KEY : '',
+                defined('LOGGED_IN_KEY') ? LOGGED_IN_KEY : '',
+                defined('NONCE_KEY') ? NONCE_KEY : ''
+            );
+            $salt = '';
+            foreach ($candidates as $candidate) {
+                if (!empty($candidate)) {
+                    $salt .= '|' . $candidate;
+                }
+            }
+
+            if ($salt === '') {
+                $system_fingerprint = function_exists('php_uname') ? php_uname() : 'featherlift-media';
+                $salt = hash('sha256', __FILE__ . '|' . $system_fingerprint . '|' . microtime(true));
+            }
+        }
+
+        $identifier = defined('ABSPATH') ? ABSPATH : __DIR__;
+        return hash('sha256', $salt . '|' . $identifier, true);
     }
 
     private function ensure_bucket_available($attachment_id = null) {
