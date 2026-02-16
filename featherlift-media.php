@@ -3,7 +3,7 @@
  * Plugin Name: Enhanced S3 Media Upload with SQS
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 3.0.2
+ * Version: 1.0.0
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '3.0.2';
+    private $version = '1.0.0';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
