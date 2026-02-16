@@ -3,7 +3,7 @@
  * Plugin Name: Enhanced S3 Media Upload with SQS
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.2
+ * Version: 1.0.3
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.2';
+    private $version = '1.0.3';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -918,42 +918,53 @@ class Enhanced_S3_Media_Upload {
      * Enqueue admin scripts
      */
     public function enqueue_admin_scripts($hook) {
-        if (in_array($hook, array('settings_page_enhanced-s3-settings', 'media_page_enhanced-s3-logs', 'media_page_enhanced-s3-bulk', 'upload.php', 'post.php'))) {
-            wp_enqueue_script(
-                'enhanced-s3-admin',
-                plugin_dir_url(__FILE__) . 'assets/admin.js',
-                array('jquery'),
-                $this->version,
-                true
-            );
-            
-            wp_localize_script('enhanced-s3-admin', 'enhancedS3Ajax', array(
-                'ajaxurl' => admin_url('admin-ajax.php'),
-                'nonce' => wp_create_nonce('enhanced_s3_nonce'),
-                'strings' => array(
-                    'setting_up' => 'Setting up AWS resources...',
-                    'uploading' => 'Queuing upload...',
-                    'downloading' => 'Queuing download...',
-                    'success' => 'Operation completed successfully',
-                    'error' => 'Operation failed',
-                    'alt_generating' => 'Generating alt tag...',
-                    'alt_success' => 'Alt text updated',
-                    'alt_error' => 'Unable to generate alt text',
-                    'alt_skip' => 'Alt text already exists'
-                ),
-                'ai' => array(
-                    'enabled' => (bool) $this->ai_alt_enabled,
-                    'agent' => $this->ai_agent,
-                    'models' => $this->get_ai_model_map()
-                )
-            ));
-            
-            wp_enqueue_style(
-                        $result = $this->generate_ai_alt_text($attachment_id, $overwrite);
-                        if (!empty($result['skipped'])) {
-                            $summary['skipped']++;
-                        } elseif (!empty($result['success'])) {
-                            $summary['success']++;
+        $screens = array(
+            'settings_page_enhanced-s3-settings',
+            'media_page_enhanced-s3-logs',
+            'media_page_enhanced-s3-bulk',
+            'upload.php',
+            'post.php'
+        );
+
+        if (!in_array($hook, $screens, true)) {
+            return;
+        }
+
+        wp_enqueue_script(
+            'enhanced-s3-admin',
+            plugin_dir_url(__FILE__) . 'assets/admin.js',
+            array('jquery'),
+            $this->version,
+            true
+        );
+
+        wp_localize_script('enhanced-s3-admin', 'enhancedS3Ajax', array(
+            'ajaxurl' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('enhanced_s3_nonce'),
+            'strings' => array(
+                'setting_up' => 'Setting up AWS resources...',
+                'uploading' => 'Queuing upload...',
+                'downloading' => 'Queuing download...',
+                'success' => 'Operation completed successfully',
+                'error' => 'Operation failed',
+                'alt_generating' => 'Generating alt tag...',
+                'alt_success' => 'Alt text updated',
+                'alt_error' => 'Unable to generate alt text',
+                'alt_skip' => 'Alt text already exists'
+            ),
+            'ai' => array(
+                'enabled' => (bool) $this->ai_alt_enabled,
+                'agent' => $this->ai_agent,
+                'models' => $this->get_ai_model_map()
+            )
+        ));
+
+        wp_enqueue_style(
+            'enhanced-s3-admin',
+            plugin_dir_url(__FILE__) . 'assets/admin.css',
+            array(),
+            $this->version
+        );
     }
 
     // Replace the entire existing method with the new comprehensive one
