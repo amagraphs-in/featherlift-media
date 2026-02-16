@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.4
+ * Version: 1.0.5
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.4';
+    private $version = '1.0.5';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -884,10 +884,11 @@ class Enhanced_S3_Media_Upload {
     public function tinypng_api_key_field() {
         $has_value = $this->has_stored_secret('tinypng_api_key');
         $current_service = $this->get_option('compression_service', 'php_native');
-        $display = ($current_service === 'tinypng') ? 'block' : 'none';
+        $active = ($current_service === 'tinypng');
         
-        echo '<div id="tinypng-api-key-field" style="display: ' . $display . ';">';
-        echo '<input type="password" name="enhanced_s3_settings[tinypng_api_key]" value="" class="regular-text" placeholder="' . ($has_value ? '********' : '') . '">';
+        echo '<div id="tinypng-api-key-field" class="tinypng-api-key-panel" data-active="' . ($active ? '1' : '0') . '">';
+        echo '<p class="description muted" data-tinypng-hint style="' . ($active ? 'display:none;' : '') . '">Select TinyPNG from the dropdown above to unlock this field.</p>';
+        echo '<input type="password" name="enhanced_s3_settings[tinypng_api_key]" value="" class="regular-text" placeholder="' . ($has_value ? '********' : '') . '" ' . ($active ? '' : 'disabled="disabled"') . '>';
         echo '<input type="hidden" name="enhanced_s3_settings[tinypng_api_key_masked]" value="' . ($has_value ? '1' : '0') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[tinypng_api_key_clear]" value="0">';
         $description = 'Required for TinyPNG service. <a href="https://tinypng.com/developers" target="_blank">Get API key</a>';
@@ -1197,12 +1198,167 @@ class Enhanced_S3_Media_Upload {
     }
 
     /**
+     * Render the FeatherLite scan table used across admin pages
+     */
+    private function render_media_scan_box($context = '') {
+        $rows = $this->get_media_scan_rows();
+        $context = sanitize_key($context);
+        echo '<div class="featherlite-scan" data-context="' . esc_attr($context) . '">';
+        echo '<div class="featherlite-scan-heading">';
+        echo '<h2>FeatherLite Optimization Box</h2>';
+        echo '<p>We scan your latest uploads so you can batch optimize or retry problem files without leaving this page.</p>';
+        echo '</div>';
+
+        if (empty($rows)) {
+            echo '<div class="featherlite-empty-state">'
+                . '<p>No recent media uploads found yet. Once you add new files they will appear here for quick optimization.</p>'
+                . '</div>';
+            echo '</div>';
+            return;
+        }
+
+        echo '<div class="featherlite-scan-actions">';
+        echo '<label class="featherlite-select-all">'
+            . '<input type="checkbox" class="featherlite-select-all-toggle"> Select all pending'
+            . '</label>';
+        echo '<button type="button" class="button button-primary featherlite-optimize-selected is-hidden">Optimize Selected</button>';
+        echo '</div>';
+
+        echo '<div class="featherlite-scan-table-wrapper">';
+        echo '<table class="wp-list-table widefat fixed striped featherlite-scan-table">';
+        echo '<thead><tr>';
+        echo '<th class="column-cb"><span class="screen-reader-text">Select file</span></th>';
+        echo '<th>Preview</th>';
+        echo '<th>Media</th>';
+        echo '<th>Status</th>';
+        echo '<th class="column-actions">Actions</th>';
+        echo '</tr></thead>';
+        echo '<tbody>';
+
+        foreach ($rows as $row) {
+            $disabled = $row['is_optimized'] ? 'disabled="disabled"' : '';
+            echo '<tr data-attachment-id="' . esc_attr($row['id']) . '">';
+            echo '<td class="column-cb">'
+                . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" ' . $disabled . '>'
+                . '</td>';
+            echo '<td class="column-thumb">' . wp_kses_post($row['thumbnail']) . '</td>';
+            echo '<td>'
+                . '<span class="featherlite-media-title">' . esc_html($row['title']) . '</span>'
+                . '<span class="featherlite-media-meta">' . esc_html($row['subtitle']) . '</span>'
+                . '</td>';
+            echo '<td>'
+                . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '">' . esc_html($row['status_label']) . '</span>'
+                . '</td>';
+            echo '<td>';
+            echo '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '" ' . $disabled . '>Optimize</button>';
+            echo '<div class="featherlite-row-status" id="status-' . esc_attr($row['id']) . '"></div>';
+            echo '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table></div>';
+        echo '<div class="featherlite-bulk-status" aria-live="polite"></div>';
+        echo '</div>';
+    }
+
+    /**
+     * Collect recent media rows for the scan box
+     */
+    private function get_media_scan_rows($limit = 8) {
+        $limit = absint(apply_filters('featherlite_media_scan_limit', $limit));
+        if ($limit <= 0) {
+            $limit = 8;
+        }
+
+        $query = new WP_Query(array(
+            'post_type'      => 'attachment',
+            'post_status'    => 'inherit',
+            'post_mime_type' => 'image',
+            'posts_per_page' => $limit,
+            'orderby'        => 'date',
+            'order'          => 'DESC',
+            'no_found_rows'  => true,
+            'fields'         => 'all'
+        ));
+
+        if (!$query->have_posts()) {
+            wp_reset_postdata();
+            return array();
+        }
+
+        $attachments = $query->posts;
+        wp_reset_postdata();
+
+        $attachment_ids = wp_list_pluck($attachments, 'ID');
+        $log_status_map = array();
+
+        if (!empty($attachment_ids) && $this->logs_table) {
+            global $wpdb;
+            $placeholders = implode(',', array_fill(0, count($attachment_ids), '%d'));
+            $sql = "SELECT attachment_id, status FROM {$this->logs_table} WHERE attachment_id IN ($placeholders) ORDER BY created_at DESC";
+            $log_rows = $wpdb->get_results($wpdb->prepare($sql, $attachment_ids));
+            if ($log_rows) {
+                foreach ($log_rows as $row) {
+                    if (!isset($log_status_map[$row->attachment_id])) {
+                        $log_status_map[$row->attachment_id] = $row->status;
+                    }
+                }
+            }
+        }
+
+        $rows = array();
+
+        foreach ($attachments as $attachment) {
+            $attachment_id = $attachment->ID;
+            $title = get_the_title($attachment_id);
+            if ($title === '') {
+                $file_path = get_attached_file($attachment_id);
+                $title = $file_path ? basename($file_path) : 'Untitled Media';
+            }
+
+            $thumb = wp_get_attachment_image($attachment_id, array(64, 64), false, array(
+                'class' => 'featherlite-thumb',
+                'loading' => 'lazy'
+            ));
+            if (!$thumb) {
+                $thumb = '<span class="featherlite-thumb placeholder">' . esc_html__('No preview', 'enhanced-s3') . '</span>';
+            }
+
+            $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
+            $log_status = isset($log_status_map[$attachment_id]) ? $log_status_map[$attachment_id] : '';
+            $status_slug = 'pending';
+            $status_label = 'Pending';
+
+            if (!empty($s3_key) || $log_status === 'completed') {
+                $status_slug = 'optimized';
+                $status_label = 'Optimized';
+            } elseif ($log_status === 'failed') {
+                $status_slug = 'failed';
+                $status_label = 'Failed';
+            }
+
+            $rows[] = array(
+                'id' => $attachment_id,
+                'title' => $title,
+                'subtitle' => $attachment->post_mime_type ?: 'image/jpeg',
+                'thumbnail' => $thumb,
+                'status_label' => $status_label,
+                'status_slug' => $status_slug,
+                'is_optimized' => ($status_slug === 'optimized')
+            );
+        }
+
+        return $rows;
+    }
+
+    /**
      * Settings page
      */
     public function settings_page() {
         ?>
         <div class="wrap">
             <h1>FeatherLift Media Settings</h1>
+            <?php $this->render_media_scan_box('settings'); ?>
             
             <form method="post" action="options.php" id="enhanced-s3-settings-form">
                 <?php
@@ -1498,6 +1654,7 @@ class Enhanced_S3_Media_Upload {
         ?>
         <div class="wrap">
             <h1>S3 Operation Logs</h1>
+            <?php $this->render_media_scan_box('logs'); ?>
             <div class="queue-overview" id="queue-overview" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin: 20px 0;">
                 <div class="queue-card" data-type="upload" style="background:#f0f8ff;padding:15px;border-left:4px solid #0073aa;">
                     <h3 style="margin-top:0;">Upload Queue</h3>
@@ -1604,6 +1761,7 @@ class Enhanced_S3_Media_Upload {
         ?>
         <div class="wrap">
             <h1>S3 Bulk Operations</h1>
+            <?php $this->render_media_scan_box('bulk'); ?>
             
             <div class="bulk-controls" style="margin-bottom: 20px;">
                 <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px;">

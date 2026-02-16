@@ -60,6 +60,145 @@
     color: #23282d;
 }
 
+/* FeatherLite Media Scan */
+.featherlite-scan {
+    background: linear-gradient(135deg, #ffffff 0%, #f7fbff 100%);
+    border: 1px solid #e0e4e9;
+    border-radius: 12px;
+    padding: 20px;
+    margin: 24px 0;
+    box-shadow: 0 12px 30px rgba(12, 44, 89, 0.08);
+}
+
+.featherlite-scan-heading h2 {
+    margin: 0 0 8px;
+    font-size: 20px;
+}
+
+.featherlite-scan-heading p {
+    margin: 0 0 16px;
+    color: #51606d;
+    max-width: 640px;
+}
+
+.featherlite-scan-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.featherlite-select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.featherlite-optimize-selected.is-hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-4px);
+}
+
+.featherlite-scan-table-wrapper {
+    overflow-x: auto;
+}
+
+.featherlite-scan-table .column-thumb {
+    width: 80px;
+}
+
+.featherlite-scan-table .column-actions {
+    width: 200px;
+}
+
+.featherlite-thumb {
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    object-fit: cover;
+    background: #f2f4f7;
+    display: block;
+}
+
+.featherlite-thumb.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #6c7781;
+    text-transform: uppercase;
+}
+
+.featherlite-media-title {
+    display: block;
+    font-weight: 600;
+}
+
+.featherlite-media-meta {
+    display: block;
+    font-size: 12px;
+    color: #6b6b6b;
+    margin-top: 2px;
+}
+
+.featherlite-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.featherlite-status.badge-pending {
+    background: #fff4e5;
+    color: #b35a00;
+}
+
+.featherlite-status.badge-optimized {
+    background: #e6f4ea;
+    color: #1f7a3b;
+}
+
+.featherlite-status.badge-failed {
+    background: #fdecec;
+    color: #b21b12;
+}
+
+.featherlite-row-status {
+    margin-top: 6px;
+    min-height: 20px;
+}
+
+.featherlite-bulk-status {
+    margin-top: 16px;
+}
+
+.featherlite-empty-state {
+    background: #f6f8fa;
+    border: 1px dashed #cdd5df;
+    border-radius: 8px;
+    padding: 16px;
+    color: #51606d;
+}
+
+/* TinyPNG key helper */
+.tinypng-api-key-panel[data-active="0"] input[disabled] {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.tinypng-api-key-panel .description.muted {
+    margin-bottom: 8px;
+    color: #6c7781;
+}
+
 /* Logs Page */
 .logs-filters {
     margin: 20px 0;

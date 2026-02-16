@@ -13,6 +13,7 @@
             this.bindEvents();
             this.loadLogs();
             this.startStatusPolling();
+            this.initFeatherliteScan();
         },
 
         /**
@@ -45,6 +46,118 @@
                 e.preventDefault();
                 var attachmentId = $(this).data('attachment-id');
                 enhancedS3.generateAltTag(attachmentId, $(this));
+            });
+        },
+
+        initFeatherliteScan: function() {
+            var self = this;
+            var $boxes = $('.featherlite-scan');
+
+            if (!$boxes.length) {
+                return;
+            }
+
+            $boxes.each(function() {
+                var $box = $(this);
+                var $selectAll = $box.find('.featherlite-select-all-toggle');
+                var $bulkBtn = $box.find('.featherlite-optimize-selected');
+                var $statusArea = $box.find('.featherlite-bulk-status');
+
+                var syncState = function() {
+                    var $eligible = $box.find('.featherlite-row-select:enabled');
+                    var $checked = $eligible.filter(':checked');
+                    var hasSelection = $checked.length > 0;
+                    $bulkBtn.prop('disabled', !hasSelection);
+                    $bulkBtn.toggleClass('is-hidden', !hasSelection);
+                    if ($eligible.length) {
+                        $selectAll.prop('checked', $checked.length === $eligible.length);
+                    } else {
+                        $selectAll.prop('checked', false);
+                    }
+                };
+
+                $box.on('change', '.featherlite-row-select', function() {
+                    if (!this.checked) {
+                        $selectAll.prop('checked', false);
+                    } else {
+                        var $eligible = $box.find('.featherlite-row-select:enabled');
+                        var $checked = $eligible.filter(':checked');
+                        if ($eligible.length && $checked.length === $eligible.length) {
+                            $selectAll.prop('checked', true);
+                        }
+                    }
+                    syncState();
+                });
+
+                $selectAll.on('change', function() {
+                    var checked = $(this).is(':checked');
+                    $box.find('.featherlite-row-select:enabled').prop('checked', checked);
+                    syncState();
+                });
+
+                $bulkBtn.on('click', function(e) {
+                    e.preventDefault();
+                    var ids = $box.find('.featherlite-row-select:enabled:checked').map(function() {
+                        return $(this).val();
+                    }).get();
+
+                    if (!ids.length) {
+                        return;
+                    }
+
+                    self.bulkOptimizeSelection(ids, $bulkBtn, $statusArea, syncState);
+                });
+
+                syncState();
+            });
+        },
+
+        bulkOptimizeSelection: function(attachmentIds, $button, $statusArea, afterCallback) {
+            if (!attachmentIds.length) {
+                return;
+            }
+
+            var originalText = $button.text();
+            $button.prop('disabled', true).text('Queuing...');
+
+            if ($statusArea && $statusArea.length) {
+                $statusArea.html('<div class="notice notice-info inline"><p>Queuing ' + attachmentIds.length + ' file(s)...</p></div>');
+            }
+
+            $.ajax({
+                url: enhancedS3Ajax.ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'bulk_s3_upload',
+                    attachment_ids: attachmentIds,
+                    nonce: enhancedS3Ajax.nonce
+                }
+            }).done(function(response) {
+                if ($statusArea && $statusArea.length) {
+                    if (response.success) {
+                        var summary = response.data;
+                        var message = 'Optimization queued for ' + summary.success + ' file(s)';
+                        if (summary.failed) {
+                            message += ' • ' + summary.failed + ' failed';
+                        }
+                        $statusArea.html('<div class="notice notice-success inline"><p>' + message + '</p></div>');
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 1500);
+                    } else {
+                        var err = typeof response.data === 'string' ? response.data : 'Unable to queue files.';
+                        $statusArea.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
+                    }
+                }
+            }).fail(function() {
+                if ($statusArea && $statusArea.length) {
+                    $statusArea.html('<div class="notice notice-error inline"><p>Network error while queueing files.</p></div>');
+                }
+            }).always(function() {
+                $button.prop('disabled', false).text(originalText);
+                if (typeof afterCallback === 'function') {
+                    afterCallback();
+                }
             });
         },
 
@@ -490,11 +603,17 @@
         $('#compression-service-select').on('change', function() {
             const selectedService = $(this).val();
             const apiKeyField = $('#tinypng-api-key-field');
-            
+            const passwordInput = apiKeyField.find('input[type="password"]');
+            const hint = apiKeyField.find('[data-tinypng-hint]');
+
             if (selectedService === 'tinypng') {
-                apiKeyField.show();
+                apiKeyField.attr('data-active', '1');
+                passwordInput.prop('disabled', false).focus();
+                hint.stop(true, true).slideUp(120);
             } else {
-                apiKeyField.hide();
+                apiKeyField.attr('data-active', '0');
+                passwordInput.prop('disabled', true);
+                hint.stop(true, true).slideDown(120);
             }
         });
         
