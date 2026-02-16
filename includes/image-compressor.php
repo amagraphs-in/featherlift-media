@@ -1,6 +1,6 @@
 <?php
 /**
- * Image Compression Handler for Enhanced S3 Plugin
+ * Image Compression Handler for FeatherLift Media Plugin
  */
 
 class Enhanced_S3_Image_Compressor {

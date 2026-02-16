@@ -1,9 +1,9 @@
 <?php
 /**
- * Plugin Name: Enhanced S3 Media Upload with SQS
+ * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.3
+ * Version: 1.0.4
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.3';
+    private $version = '1.0.4';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -73,6 +73,8 @@ class Enhanced_S3_Media_Upload {
     private $anthropic_api_key;
     private $custom_ai_api_key;
     private $custom_ai_endpoint;
+    private $intent_committed = false;
+    private $ai_features_available = false;
     
     // Database table names
     private $logs_table;
@@ -141,12 +143,15 @@ class Enhanced_S3_Media_Upload {
         $this->tinypng_api_key = $this->get_option('tinypng_api_key', '');
         $this->bucket_autoname_strategy = $this->get_option('bucket_autoname_strategy', 'file');
         $this->preserve_bucket_permissions = (bool) $this->get_option('preserve_bucket_permissions', true);
-        $this->optimize_media = (bool) $this->get_option('optimize_media', true);
-        $this->offload_media = (bool) $this->get_option('offload_media', true);
+        $this->optimize_media = (bool) $this->get_option('optimize_media', false);
+        $this->offload_media = (bool) $this->get_option('offload_media', false);
+        $this->intent_committed = array_key_exists('optimize_media', $this->options) || array_key_exists('offload_media', $this->options);
         $this->auto_resize_images = (bool) $this->get_option('auto_resize_images', false);
         $this->resize_max_width = intval($this->get_option('resize_max_width', $this->default_resize_cap));
         $this->resize_max_height = intval($this->get_option('resize_max_height', $this->default_resize_cap));
-        $this->ai_alt_enabled = (bool) $this->get_option('ai_alt_enabled', false);
+        $stored_ai_enabled = (bool) $this->get_option('ai_alt_enabled', false);
+        $this->ai_features_available = (bool) apply_filters('enhanced_s3_ai_ui_enabled', false);
+        $this->ai_alt_enabled = $this->ai_features_available ? $stored_ai_enabled : false;
         $this->ai_agent = $this->get_option('ai_agent', 'openai');
         $this->ai_model = $this->get_option('ai_model', 'gpt-4o-mini');
         $this->ai_site_brief = $this->get_option('ai_site_brief', get_bloginfo('description'));
@@ -237,7 +242,7 @@ class Enhanced_S3_Media_Upload {
     public function auto_upload_admin_notice() {
         if ($this->auto_upload_new_files && current_user_can('upload_files')) {
             echo '<div class="notice notice-info">
-                <p><strong>Enhanced S3:</strong> Auto-upload is enabled. New media files will be automatically uploaded to S3.</p>
+                <p><strong>FeatherLift Media:</strong> Auto-upload is enabled. New media files will be automatically uploaded to S3.</p>
             </div>';
         }
     }
@@ -552,8 +557,8 @@ class Enhanced_S3_Media_Upload {
      */
     public function add_admin_menus() {
         add_options_page(
-            'Enhanced S3 Settings',
-            'Enhanced S3',
+            'FeatherLift Media Settings',
+            'FeatherLift Media',
             'manage_options',
             'enhanced-s3-settings',
             array($this, 'settings_page')
@@ -687,84 +692,86 @@ class Enhanced_S3_Media_Upload {
             'enhanced_s3_automation_section'
         );
 
-        add_settings_section(
-            'enhanced_s3_ai_section',
-            'AI Alt Text Automation',
-            array($this, 'ai_section_callback'),
-            'enhanced-s3-settings'
-        );
+        if ($this->ai_features_available) {
+            add_settings_section(
+                'enhanced_s3_ai_section',
+                'AI Alt Text Automation',
+                array($this, 'ai_section_callback'),
+                'enhanced-s3-settings'
+            );
 
-        add_settings_field(
-            'ai_alt_enabled',
-            'Enable Alt Generation',
-            array($this, 'ai_alt_enabled_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'ai_alt_enabled',
+                'Enable Alt Generation',
+                array($this, 'ai_alt_enabled_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'ai_site_brief',
-            'Site Context',
-            array($this, 'ai_site_brief_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'ai_site_brief',
+                'Site Context',
+                array($this, 'ai_site_brief_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'ai_agent',
-            'AI Provider',
-            array($this, 'ai_agent_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'ai_agent',
+                'AI Provider',
+                array($this, 'ai_agent_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'ai_model',
-            'Preferred Model',
-            array($this, 'ai_model_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'ai_model',
+                'Preferred Model',
+                array($this, 'ai_model_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'ai_skip_existing_alt',
-            'Skip Existing Alt Text',
-            array($this, 'ai_skip_existing_alt_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'ai_skip_existing_alt',
+                'Skip Existing Alt Text',
+                array($this, 'ai_skip_existing_alt_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'openai_api_key',
-            'OpenAI API Key',
-            array($this, 'openai_api_key_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'openai_api_key',
+                'OpenAI API Key',
+                array($this, 'openai_api_key_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'anthropic_api_key',
-            'Anthropic API Key',
-            array($this, 'anthropic_api_key_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'anthropic_api_key',
+                'Anthropic API Key',
+                array($this, 'anthropic_api_key_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'custom_ai_endpoint',
-            'Custom Endpoint URL',
-            array($this, 'custom_ai_endpoint_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'custom_ai_endpoint',
+                'Custom Endpoint URL',
+                array($this, 'custom_ai_endpoint_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
 
-        add_settings_field(
-            'custom_ai_api_key',
-            'Custom Endpoint API Key',
-            array($this, 'custom_ai_api_key_field'),
-            'enhanced-s3-settings',
-            'enhanced_s3_ai_section'
-        );
+            add_settings_field(
+                'custom_ai_api_key',
+                'Custom Endpoint API Key',
+                array($this, 'custom_ai_api_key_field'),
+                'enhanced-s3-settings',
+                'enhanced_s3_ai_section'
+            );
+        }
     }
     public function auto_upload_file_types_field() {
         $value = $this->get_option('auto_upload_file_types', array('image'));
@@ -817,7 +824,7 @@ class Enhanced_S3_Media_Upload {
         }
 
         if (!$this->ensure_bucket_available($attachment_id)) {
-            error_log('Enhanced S3: Skipping auto-upload because bucket could not be created.');
+            error_log('FeatherLift Media: Skipping auto-upload because bucket could not be created.');
             return;
         }
         
@@ -840,7 +847,7 @@ class Enhanced_S3_Media_Upload {
                 });
             }
         } catch (Exception $e) {
-            error_log('Enhanced S3: Auto-upload failed for attachment ' . $attachment_id . ': ' . $e->getMessage());
+            error_log('FeatherLift Media: Auto-upload failed for attachment ' . $attachment_id . ': ' . $e->getMessage());
         }
     }
     public function compression_section_callback() {
@@ -1091,7 +1098,7 @@ class Enhanced_S3_Media_Upload {
                 
                 <p>You can monitor progress in your WordPress admin: <a href='{$site_url}/wp-admin/upload.php?page=enhanced-s3-logs'>View S3 Logs</a></p>
                 
-                <p>Best regards,<br>Enhanced S3 Plugin</p>
+                <p>Best regards,<br>FeatherLift Media</p>
             </div>
         </body>
         </html>";
@@ -1144,7 +1151,7 @@ class Enhanced_S3_Media_Upload {
                 
                 <p>View detailed logs: <a href='{$site_url}/wp-admin/upload.php?page=enhanced-s3-logs'>S3 Operation Logs</a></p>
                 
-                <p>Best regards,<br>Enhanced S3 Plugin</p>
+                <p>Best regards,<br>FeatherLift Media</p>
             </div>
         </body>
         </html>";
@@ -1183,7 +1190,7 @@ class Enhanced_S3_Media_Upload {
                 
                 <p>View logs: <a href='{$site_url}/wp-admin/upload.php?page=enhanced-s3-logs'>S3 Operation Logs</a></p>
                 
-                <p>Best regards,<br>Enhanced S3 Plugin</p>
+                <p>Best regards,<br>FeatherLift Media</p>
             </div>
         </body>
         </html>";
@@ -1195,7 +1202,7 @@ class Enhanced_S3_Media_Upload {
     public function settings_page() {
         ?>
         <div class="wrap">
-            <h1>Enhanced S3 Media Upload Settings</h1>
+            <h1>FeatherLift Media Settings</h1>
             
             <form method="post" action="options.php" id="enhanced-s3-settings-form">
                 <?php
@@ -1203,7 +1210,20 @@ class Enhanced_S3_Media_Upload {
                 global $wp_settings_sections, $wp_settings_fields;
                 $sections = isset($wp_settings_sections['enhanced-s3-settings']) ? $wp_settings_sections['enhanced-s3-settings'] : array();
                 echo '<div class="enhanced-s3-settings-grid">';
+                if (!$this->intent_committed) {
+                    echo '<div class="notice notice-info intent-onboarding"><p>Select at least one option under "What should this plugin do?" and save. Optimization and offload settings will unlock after you confirm your intent.</p></div>';
+                }
                 foreach ($sections as $section_id => $section) {
+                    if ($section_id === 'enhanced_s3_ai_section') {
+                        continue;
+                    }
+                    if ($section_id === 'enhanced_s3_optimize_section' && (!$this->intent_committed || !$this->optimize_media)) {
+                        continue;
+                    }
+                    if ($section_id === 'enhanced_s3_offload_section' && (!$this->intent_committed || !$this->offload_media)) {
+                        continue;
+                    }
+
                     echo '<div class="enhanced-s3-card">';
                     if (!empty($section['title'])) {
                         echo '<h2>' . esc_html($section['title']) . '</h2>';
@@ -2188,7 +2208,7 @@ file_put_contents($temp_file, $test_content);
         $html = ob_get_clean();
         
         $form_fields['enhanced_s3_controls'] = array(
-            'label' => 'Enhanced S3 Controls',
+            'label' => 'FeatherLift Media Controls',
             'input' => 'html',
             'html' => $html
         );
@@ -2400,7 +2420,7 @@ file_put_contents($temp_file, $test_content);
             $code = sanitize_text_field(wp_unslash($_GET['enhanced_s3_post_alt_error']));
             $message = 'AI alt generation failed for the selected posts.';
             if ($code === 'disabled') {
-                $message = 'Enable AI alt text automation in Enhanced S3 settings to use this bulk action.';
+                $message = 'Enable AI alt text automation in FeatherLift Media settings to use this bulk action.';
             } elseif ($code === 'empty') {
                 $message = 'Select at least one post before running Generate Alt Tags.';
             }
@@ -2435,7 +2455,7 @@ file_put_contents($temp_file, $test_content);
             $code = sanitize_text_field(wp_unslash($_GET['enhanced_s3_alt_error']));
             $message = 'AI alt generation failed.';
             if ($code === 'disabled') {
-                $message = 'Enable AI alt text automation in Enhanced S3 settings first.';
+                $message = 'Enable AI alt text automation in FeatherLift Media settings first.';
             } elseif ($code === 'empty') {
                 $message = 'Select at least one image before running Generate Alt Tags.';
             }
@@ -2464,11 +2484,11 @@ file_put_contents($temp_file, $test_content);
 
         if (!empty($_GET['enhanced_s3_bulk_error'])) {
             $error = sanitize_text_field(wp_unslash($_GET['enhanced_s3_bulk_error']));
-            $message = 'Enhanced S3 bulk action failed.';
+            $message = 'FeatherLift Media bulk action failed.';
             if ($error === 'queue') {
-                $message = 'Enhanced S3 could not initialize the queue. Please verify your AWS credentials.';
+                $message = 'FeatherLift Media could not initialize the queue. Please verify your AWS credentials.';
             } elseif ($error === 'bucket') {
-                $message = 'Enhanced S3 was unable to create the target bucket automatically. Check AWS permissions.';
+                $message = 'FeatherLift Media was unable to create the target bucket automatically. Check AWS permissions.';
             } elseif ($error === 'empty') {
                 $message = 'No media files were selected for the bulk action.';
             }
@@ -2487,7 +2507,7 @@ file_put_contents($temp_file, $test_content);
         $label = $is_upload ? 'upload' : 'download';
         $class = $failed > 0 ? 'notice-warning' : 'notice-success';
         $message = sprintf(
-            'Enhanced S3 queued %1$d %2$s request(s)%3$s.',
+            'FeatherLift Media queued %1$d %2$s request(s)%3$s.',
             $success,
             $label,
             $failed > 0 ? sprintf(' (%d failed)', $failed) : ''
@@ -2607,7 +2627,7 @@ file_put_contents($temp_file, $test_content);
         ));
 
         if (empty($result['success'])) {
-            error_log('Enhanced S3: Unable to create bucket automatically - ' . ($result['error'] ?? 'Unknown error'));
+            error_log('FeatherLift Media: Unable to create bucket automatically - ' . ($result['error'] ?? 'Unknown error'));
             return false;
         }
 
@@ -3063,7 +3083,7 @@ file_put_contents($temp_file, $test_content);
     
     // Field callback methods
     public function intent_section_callback() {
-        echo '<p>Select the workflow you want this plugin to automate. You can run optimization only, offload only, or chain both so every upload is compressed before landing on S3/CloudFront.</p>';
+        echo '<p>Choose the workflow you want to enable, then save changes to unlock the matching settings panels. You can enable optimization only, offload only, or chain both so every upload is compressed before landing on S3/CloudFront.</p>';
     }
 
     public function optimize_section_callback() {
@@ -3176,13 +3196,13 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function optimize_media_field() {
-        $value = $this->get_option('optimize_media', true);
+        $value = $this->get_option('optimize_media', false);
         echo '<label><input type="checkbox" id="enhanced-s3-enable-optimization" name="enhanced_s3_settings[optimize_media]" value="1" ' . checked($value, true, false) . '> Optimize images (TinyPNG/ImageOptim/PHP + smart resize)</label>';
         echo '<p class="description">Keeps originals safe but delivers slimmer assets. Required for TinyPNG + auto-resize workflows.</p>';
     }
 
     public function offload_media_field() {
-        $value = $this->get_option('offload_media', true);
+        $value = $this->get_option('offload_media', false);
         echo '<label><input type="checkbox" id="enhanced-s3-enable-offload" name="enhanced_s3_settings[offload_media]" value="1" ' . checked($value, true, false) . '> Store media on Amazon S3 and optionally serve via CloudFront</label>';
         echo '<p class="description">When enabled, uploads are moved off the web server and delivered from cloud storage/CDN.</p>';
     }
@@ -3467,7 +3487,9 @@ file_put_contents($temp_file, $test_content);
             'preserve_bucket_permissions',
             'auto_resize_images',
             'ai_alt_enabled',
-            'ai_skip_existing_alt'
+            'ai_skip_existing_alt',
+            'optimize_media',
+            'offload_media'
         );
         
         foreach ($checkbox_fields as $field) {
@@ -3671,7 +3693,7 @@ file_put_contents($temp_file, $test_content);
                 <p>Deactivating this plugin without properly restoring your files could result in broken media links on your website.</p>
                 <p><strong>To safely remove this plugin:</strong></p>
                 <ol>
-                    <li>Go to <a href="' . admin_url('options-general.php?page=enhanced-s3-settings') . '">Enhanced S3 Settings</a></li>
+                    <li>Go to <a href="' . admin_url('options-general.php?page=enhanced-s3-settings') . '">FeatherLift Media Settings</a></li>
                     <li>Use the "Reset AWS Configuration" option</li>
                     <li>Choose to download all S3 files back to local storage</li>
                     <li>Then you can safely deactivate the plugin</li>
@@ -3696,7 +3718,7 @@ file_put_contents($temp_file, $test_content);
             
             if ($s3_files_count > 0) {
                 echo '<div class="notice notice-warning">
-                    <p><strong>Enhanced S3 Plugin:</strong> This plugin is managing ' . $s3_files_count . ' files on Amazon S3. 
+                    <p><strong>FeatherLift Media:</strong> This plugin is managing ' . $s3_files_count . ' files on Amazon S3. 
                     <a href="' . admin_url('options-general.php?page=enhanced-s3-settings') . '">Restore files locally</a> before deactivating to prevent broken media links.</p>
                 </div>';
             }

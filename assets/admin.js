@@ -1,5 +1,5 @@
 /**
- * Enhanced S3 Admin JavaScript
+ * FeatherLift Media Admin JavaScript
  */
 (function($) {
     'use strict';

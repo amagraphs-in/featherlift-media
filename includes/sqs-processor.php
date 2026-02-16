@@ -1,6 +1,6 @@
 <?php
 /**
- * SQS Queue Processor for Enhanced S3 Plugin
+ * SQS Queue Processor for FeatherLift Media Plugin
  * Handles processing of upload and download operations
  */
 
@@ -267,6 +267,37 @@ class Enhanced_S3_Queue_Manager {
         
         return $deleted;
     }
+
+    /**
+     * Prepare contextual metadata for queued jobs
+     */
+    private function prepare_job_meta($context = array(), $operation_type = '') {
+        $meta = array();
+        if (!empty($operation_type)) {
+            $meta['operation'] = sanitize_key($operation_type);
+        }
+        if (!empty($context['source'])) {
+            $meta['source'] = sanitize_key($context['source']);
+        }
+        if (isset($context['post_id'])) {
+            $meta['post_id'] = absint($context['post_id']);
+        }
+        if (!empty($context['batch'])) {
+            $meta['batch'] = sanitize_key($context['batch']);
+        }
+        if (isset($context['initiator'])) {
+            $meta['initiator'] = absint($context['initiator']);
+        }
+        if (!empty($context['notes'])) {
+            $meta['notes'] = sanitize_text_field($context['notes']);
+        }
+        if (isset($context['original_log'])) {
+            $meta['previous_log'] = absint($context['original_log']);
+        }
+        return array_filter($meta, function($value) {
+            return $value !== null && $value !== '';
+        });
+    }
     
     /**
      * Process SQS queue messages
@@ -302,7 +333,7 @@ class Enhanced_S3_Queue_Manager {
             } while (!empty($result['messages']) && $processed < 100);
             
         } catch (Exception $e) {
-            error_log('Enhanced S3 SQS Processor Error: ' . $e->getMessage());
+            error_log('FeatherLift Media SQS Processor Error: ' . $e->getMessage());
         }
     }
 
@@ -391,36 +422,8 @@ class Enhanced_S3_Queue_Manager {
                     $temporary_files[] = $processing_path;
                     $this->maybe_update_metadata_dimensions($attachment_id, $resize_results);
                 } elseif (isset($resize_results['error'])) {
-                    error_log('Enhanced S3: Resize failed for attachment ' . $attachment_id . ': ' . $resize_results['error']);
+                    error_log('FeatherLift Media: Resize failed for attachment ' . $attachment_id . ': ' . $resize_results['error']);
                 }
-
-                    private function prepare_job_meta($context = array(), $operation_type = '') {
-                        $meta = array();
-                        if (!empty($operation_type)) {
-                            $meta['operation'] = sanitize_key($operation_type);
-                        }
-                        if (!empty($context['source'])) {
-                            $meta['source'] = sanitize_key($context['source']);
-                        }
-                        if (isset($context['post_id'])) {
-                            $meta['post_id'] = absint($context['post_id']);
-                        }
-                        if (!empty($context['batch'])) {
-                            $meta['batch'] = sanitize_key($context['batch']);
-                        }
-                        if (isset($context['initiator'])) {
-                            $meta['initiator'] = absint($context['initiator']);
-                        }
-                        if (!empty($context['notes'])) {
-                            $meta['notes'] = sanitize_text_field($context['notes']);
-                        }
-                        if (isset($context['original_log'])) {
-                            $meta['previous_log'] = absint($context['original_log']);
-                        }
-                        return array_filter($meta, function($value) {
-                            return $value !== null && $value !== '';
-                        });
-                    }
             }
             
             // Compress image if enabled and it's an image
@@ -440,13 +443,13 @@ class Enhanced_S3_Queue_Manager {
                         $compression_results = $compression_result;
                         
                         // Log compression results
-                        error_log("Enhanced S3: Compressed attachment {$attachment_id} - Original: " . 
+                        error_log("FeatherLift Media: Compressed attachment {$attachment_id} - Original: " . 
                             $this->format_bytes($compression_result['original_size']) . 
                             ", Compressed: " . $this->format_bytes($compression_result['compressed_size']) . 
                             ", Savings: {$compression_result['savings_percent']}% using {$compression_result['service_used']}");
                     } else {
                         // Compression failed, use original file
-                        error_log("Enhanced S3: Compression failed for attachment {$attachment_id}: " . $compression_result['error']);
+                        error_log("FeatherLift Media: Compression failed for attachment {$attachment_id}: " . $compression_result['error']);
                     }
                 }
             }
@@ -534,7 +537,7 @@ class Enhanced_S3_Queue_Manager {
                 " (compressed from " . $this->format_bytes($original_file_size) . " to " . $this->format_bytes($final_file_size) . ")" : 
                 " (" . $this->format_bytes($final_file_size) . ")";
             
-            error_log("Enhanced S3: Successfully uploaded attachment {$attachment_id} to S3 as {$s3_key}{$size_info}");
+            error_log("FeatherLift Media: Successfully uploaded attachment {$attachment_id} to S3 as {$s3_key}{$size_info}");
             
         } catch (Exception $e) {
             // Clean up temporary compressed file on error
@@ -542,7 +545,7 @@ class Enhanced_S3_Queue_Manager {
                 unlink($compressed_path);
             }
             
-            error_log("Enhanced S3: Upload failed for attachment {$attachment_id}: " . $e->getMessage());
+            error_log("FeatherLift Media: Upload failed for attachment {$attachment_id}: " . $e->getMessage());
             $this->update_log_status($log_id, 'failed', $e->getMessage());
         }
     }
@@ -815,7 +818,7 @@ class Enhanced_S3_Queue_Manager {
                 $this->update_log_status($log_id, 'failed', $e->getMessage());
             }
             
-            error_log('Enhanced S3 Message Processing Error: ' . $e->getMessage());
+            error_log('FeatherLift Media Message Processing Error: ' . $e->getMessage());
         }
     }
     

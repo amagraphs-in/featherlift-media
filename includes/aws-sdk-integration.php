@@ -1,6 +1,6 @@
 <?php
 /**
- * AWS SDK Integration for Enhanced S3 Plugin
+ * AWS SDK Integration for FeatherLift Media Plugin
  * This class handles all AWS operations including S3, SQS, and CloudFront
  */
 

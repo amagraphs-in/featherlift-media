@@ -1,5 +1,5 @@
 /**
- * Enhanced S3 Admin Styles
+ * FeatherLift Media Admin Styles
  */
 
 /* Settings Page */
@@ -12,10 +12,9 @@
 }
 
 .enhanced-s3-settings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    gap: 20px;
+    display: block;
     margin-top: 20px;
+    max-width: 920px;
 }
 
 .enhanced-s3-card {
@@ -24,6 +23,11 @@
     border-radius: 8px;
     padding: 20px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.04);
+    margin-bottom: 24px;
+}
+
+.intent-onboarding {
+    margin-bottom: 16px;
 }
 
 .enhanced-s3-card h2 {
@@ -96,7 +100,7 @@
     background-color: #dc3232;
 }
 
-/* Enhanced S3 Controls in Media Modal */
+/* FeatherLift Media Controls in Media Modal */
 .enhanced-s3-controls {
     background: #f9f9f9;
     border-radius: 3px;

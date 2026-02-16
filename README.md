@@ -1,6 +1,6 @@
-# Featherlift Media
+# FeatherLift Media
 
-Enhanced S3 Media Upload is a WordPress plugin that lets teams optimize images, offload media to Amazon S3, and serve assets through CloudFront with optional SQS-based automation. The plugin also ships with AI helpers for alt text, bulk processing utilities, and an opinionated release pipeline powered by GitHub Actions.
+FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that lets teams optimize images, offload media to Amazon S3, and serve assets through CloudFront with optional SQS-based automation. The plugin also ships with AI helpers for alt text, bulk processing utilities, and an opinionated release pipeline powered by GitHub Actions.
 
 ## Key Capabilities
 - Toggleable media optimization (resize + compression) and offload/CDN workflows
@@ -12,8 +12,8 @@ Enhanced S3 Media Upload is a WordPress plugin that lets teams optimize images, 
 
 ## Installation
 1. Clone or download this repository into your WordPress `wp-content/plugins` directory.
-2. Activate **Enhanced S3 Media Upload with SQS** from the WordPress Plugins screen.
-3. Open **Media → Featherlift Media** to configure AWS credentials, optimization rules, and automation preferences.
+2. Activate **FeatherLift Media** from the WordPress Plugins screen.
+3. Open **Media → FeatherLift Media** to configure AWS credentials, optimization rules, and automation preferences.
 
 ## Configuration Checklist
 - AWS access key, secret, and preferred region
@@ -31,6 +31,11 @@ Enhanced S3 Media Upload is a WordPress plugin that lets teams optimize images, 
 5. GitHub Actions (`.github/workflows/release.yml`) builds the distributable ZIP and publishes it as a GitHub Release.
 
 ## Release Notes
+### v1.0.4 — 2026-02-16
+- Rebranded all plugin UI strings, notices, and documentation to FeatherLift Media while keeping legacy functionality intact.
+- Hardened the onboarding flow so optimization/offload controls stay hidden until settings are saved, and disabled AI helpers by default.
+- Simplified the admin layout to a single-column stack to avoid grid breakage and improve readability.
+
 ### v1.0.3 — 2026-02-16
 - Fixed a PHP parse error introduced in the admin script enqueue logic that prevented plugin activation.
 - Confirmed assets/admin.js and assets/admin.css load correctly on all media and settings screens.
