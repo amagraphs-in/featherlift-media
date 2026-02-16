@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build plugin zip
+        run: |
+          set -euo pipefail
+          PLUGIN_SLUG="featherlift-media"
+          DIST_DIR="dist"
+          ZIP_FILE="${PLUGIN_SLUG}-${GITHUB_REF_NAME}.zip"
+
+          rm -rf "$DIST_DIR"
+          mkdir -p "$DIST_DIR/$PLUGIN_SLUG"
+
+          rsync -av \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude '.vscode/' \
+            --exclude 'dist/' \
+            --exclude '.DS_Store' \
+            ./ "$DIST_DIR/$PLUGIN_SLUG"/
+
+          cd "$DIST_DIR"
+          zip -r "../$ZIP_FILE" "$PLUGIN_SLUG"
+          cd ..
+
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Create GitHub release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_FILE }}
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            Automated release for ${{ github.ref_name }}.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
