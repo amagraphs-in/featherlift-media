@@ -42,6 +42,12 @@
                 enhancedS3.queueDownload(attachmentId);
             });
 
+            $(document).on('click', '.enhanced-s3-optimize-btn', function(e) {
+                e.preventDefault();
+                var attachmentId = $(this).data('attachment-id');
+                enhancedS3.optimizeAttachment(attachmentId);
+            });
+
             $(document).on('click', '.enhanced-s3-generate-alt', function(e) {
                 e.preventDefault();
                 var attachmentId = $(this).data('attachment-id');
@@ -60,15 +66,28 @@
             $boxes.each(function() {
                 var $box = $(this);
                 var $selectAll = $box.find('.featherlite-select-all-toggle');
-                var $bulkBtn = $box.find('.featherlite-optimize-selected');
+                var $bulkOptimizeBtn = $box.find('.featherlite-optimize-selected');
+                var $bulkUploadBtn = $box.find('.featherlite-upload-selected');
                 var $statusArea = $box.find('.featherlite-bulk-status');
 
                 var syncState = function() {
                     var $eligible = $box.find('.featherlite-row-select:enabled');
                     var $checked = $eligible.filter(':checked');
                     var hasSelection = $checked.length > 0;
-                    $bulkBtn.prop('disabled', !hasSelection);
-                    $bulkBtn.toggleClass('is-hidden', !hasSelection);
+                    if ($bulkOptimizeBtn.length) {
+                        var canOptimize = $checked.filter(function() {
+                            return $(this).data('can-optimize') === 1 || $(this).data('can-optimize') === '1';
+                        }).length > 0;
+                        $bulkOptimizeBtn.prop('disabled', !canOptimize);
+                        $bulkOptimizeBtn.toggleClass('is-hidden', !canOptimize);
+                    }
+                    if ($bulkUploadBtn.length) {
+                        var canUpload = $checked.filter(function() {
+                            return $(this).data('can-upload') === 1 || $(this).data('can-upload') === '1';
+                        }).length > 0;
+                        $bulkUploadBtn.prop('disabled', !canUpload);
+                        $bulkUploadBtn.toggleClass('is-hidden', !canUpload);
+                    }
                     if ($eligible.length) {
                         $selectAll.prop('checked', $checked.length === $eligible.length);
                     } else {
@@ -95,18 +114,39 @@
                     syncState();
                 });
 
-                $bulkBtn.on('click', function(e) {
-                    e.preventDefault();
-                    var ids = $box.find('.featherlite-row-select:enabled:checked').map(function() {
-                        return $(this).val();
-                    }).get();
+                if ($bulkOptimizeBtn.length) {
+                    $bulkOptimizeBtn.on('click', function(e) {
+                        e.preventDefault();
+                        var ids = $box.find('.featherlite-row-select:enabled:checked').filter(function() {
+                            return $(this).data('can-optimize') === 1 || $(this).data('can-optimize') === '1';
+                        }).map(function() {
+                            return $(this).val();
+                        }).get();
 
-                    if (!ids.length) {
-                        return;
-                    }
+                        if (!ids.length) {
+                            return;
+                        }
 
-                    self.bulkOptimizeSelection(ids, $bulkBtn, $statusArea, syncState);
-                });
+                        self.bulkOptimizeSelection(ids, $bulkOptimizeBtn, $statusArea, syncState);
+                    });
+                }
+
+                if ($bulkUploadBtn.length) {
+                    $bulkUploadBtn.on('click', function(e) {
+                        e.preventDefault();
+                        var ids = $box.find('.featherlite-row-select:enabled:checked').filter(function() {
+                            return $(this).data('can-upload') === 1 || $(this).data('can-upload') === '1';
+                        }).map(function() {
+                            return $(this).val();
+                        }).get();
+
+                        if (!ids.length) {
+                            return;
+                        }
+
+                        self.bulkUploadSelection(ids, $bulkUploadBtn, $statusArea, syncState);
+                    });
+                }
 
                 syncState();
             });
@@ -121,14 +161,14 @@
             $button.prop('disabled', true).text('Queuing...');
 
             if ($statusArea && $statusArea.length) {
-                $statusArea.html('<div class="notice notice-info inline"><p>Queuing ' + attachmentIds.length + ' file(s)...</p></div>');
+                $statusArea.html('<div class="notice notice-info inline"><p>Optimizing ' + attachmentIds.length + ' file(s)...</p></div>');
             }
 
             $.ajax({
                 url: enhancedS3Ajax.ajaxurl,
                 type: 'POST',
                 data: {
-                    action: 'bulk_s3_upload',
+                    action: 'bulk_optimize_media',
                     attachment_ids: attachmentIds,
                     nonce: enhancedS3Ajax.nonce
                 }
@@ -136,7 +176,7 @@
                 if ($statusArea && $statusArea.length) {
                     if (response.success) {
                         var summary = response.data;
-                        var message = 'Optimization queued for ' + summary.success + ' file(s)';
+                        var message = 'Optimized ' + summary.success + ' file(s)';
                         if (summary.failed) {
                             message += ' • ' + summary.failed + ' failed';
                         }
@@ -151,7 +191,56 @@
                 }
             }).fail(function() {
                 if ($statusArea && $statusArea.length) {
-                    $statusArea.html('<div class="notice notice-error inline"><p>Network error while queueing files.</p></div>');
+                    $statusArea.html('<div class="notice notice-error inline"><p>Network error while optimizing files.</p></div>');
+                }
+            }).always(function() {
+                $button.prop('disabled', false).text(originalText);
+                if (typeof afterCallback === 'function') {
+                    afterCallback();
+                }
+            });
+        },
+
+        bulkUploadSelection: function(attachmentIds, $button, $statusArea, afterCallback) {
+            if (!attachmentIds.length) {
+                return;
+            }
+
+            var originalText = $button.text();
+            $button.prop('disabled', true).text('Queuing...');
+
+            if ($statusArea && $statusArea.length) {
+                $statusArea.html('<div class="notice notice-info inline"><p>Queuing ' + attachmentIds.length + ' upload(s)...</p></div>');
+            }
+
+            $.ajax({
+                url: enhancedS3Ajax.ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'bulk_s3_upload',
+                    attachment_ids: attachmentIds,
+                    nonce: enhancedS3Ajax.nonce
+                }
+            }).done(function(response) {
+                if ($statusArea && $statusArea.length) {
+                    if (response.success) {
+                        var summary = response.data;
+                        var message = 'Queued ' + summary.success + ' upload(s)';
+                        if (summary.failed) {
+                            message += ' • ' + summary.failed + ' failed';
+                        }
+                        $statusArea.html('<div class="notice notice-success inline"><p>' + message + '</p></div>');
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 1500);
+                    } else {
+                        var err = typeof response.data === 'string' ? response.data : 'Unable to queue uploads.';
+                        $statusArea.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
+                    }
+                }
+            }).fail(function() {
+                if ($statusArea && $statusArea.length) {
+                    $statusArea.html('<div class="notice notice-error inline"><p>Network error while queueing uploads.</p></div>');
                 }
             }).always(function() {
                 $button.prop('disabled', false).text(originalText);
@@ -231,6 +320,49 @@
                 },
                 error: function() {
                     $statusDiv.html('<div class="notice notice-error inline"><p>Network error occurred</p></div>');
+                }
+            });
+        },
+
+        optimizeAttachment: function(attachmentId, options) {
+            if (!attachmentId) {
+                return;
+            }
+
+            options = options || {};
+            var statusSelector = options.statusSelector || '#opt-status-' + attachmentId;
+            var $statusDiv = $(statusSelector);
+            if (!$statusDiv.length) {
+                $statusDiv = $('#status-' + attachmentId);
+            }
+
+            if ($statusDiv.length) {
+                $statusDiv.html('<div class="notice notice-info inline"><p>' + (enhancedS3Ajax.strings.optimize_queueing || 'Optimizing...') + '</p></div>');
+            }
+
+            $.ajax({
+                url: enhancedS3Ajax.ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'optimize_media',
+                    attachment_id: attachmentId,
+                    nonce: enhancedS3Ajax.nonce
+                }
+            }).done(function(response) {
+                if ($statusDiv.length) {
+                    if (response.success) {
+                        $statusDiv.html('<div class="notice notice-success inline"><p>' + (enhancedS3Ajax.strings.optimize_success || 'Optimization complete') + '</p></div>');
+                        setTimeout(function() {
+                            window.location.reload();
+                        }, 1200);
+                    } else {
+                        var err = typeof response.data === 'string' ? response.data : (enhancedS3Ajax.strings.optimize_error || 'Unable to optimize');
+                        $statusDiv.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
+                    }
+                }
+            }).fail(function() {
+                if ($statusDiv.length) {
+                    $statusDiv.html('<div class="notice notice-error inline"><p>' + (enhancedS3Ajax.strings.optimize_error || 'Unable to optimize') + '</p></div>');
                 }
             });
         },
@@ -788,9 +920,11 @@
             
             // Add S3 controls
             var controls = '<div class="enhanced-s3-controls" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">' +
-                '<h3>S3 Management</h3>' +
-                '<button type="button" class="button button-primary enhanced-s3-upload-btn" data-attachment-id="' + attachmentId + '">Upload to S3</button> ' +
-                '<button type="button" class="button enhanced-s3-download-btn" data-attachment-id="' + attachmentId + '">Download from S3</button>' +
+                '<h3>Media Workflow</h3>' +
+                (enhancedS3Ajax.workflows && enhancedS3Ajax.workflows.optimize_enabled ? '<button type="button" class="button enhanced-s3-optimize-btn" data-attachment-id="' + attachmentId + '">Optimize</button> ' : '') +
+                (enhancedS3Ajax.workflows && enhancedS3Ajax.workflows.offload_enabled ? '<button type="button" class="button button-primary enhanced-s3-upload-btn" data-attachment-id="' + attachmentId + '" ' + (enhancedS3Ajax.workflows.aws_configured ? '' : 'disabled') + '>Upload to S3</button> ' +
+                '<button type="button" class="button enhanced-s3-download-btn" data-attachment-id="' + attachmentId + '">Download from S3</button>' : '') +
+                '<div id="opt-status-' + attachmentId + '" style="margin-top: 10px;"></div>' +
                 '<div id="status-' + attachmentId + '" style="margin-top: 10px;"></div>' +
                 '</div>';
             

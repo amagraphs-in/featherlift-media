@@ -104,6 +104,13 @@
     transform: translateY(-4px);
 }
 
+.featherlite-upload-selected.is-hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-4px);
+}
+
 .featherlite-scan-table-wrapper {
     overflow-x: auto;
 }
@@ -161,9 +168,14 @@
     color: #b35a00;
 }
 
-.featherlite-status.badge-optimized {
+.featherlite-status.badge-offloaded {
     background: #e6f4ea;
     color: #1f7a3b;
+}
+
+.featherlite-status.badge-optimized-local {
+    background: #e8f1ff;
+    color: #1a4b9d;
 }
 
 .featherlite-status.badge-failed {
@@ -178,6 +190,13 @@
 
 .featherlite-bulk-status {
     margin-top: 16px;
+}
+
+.featherlite-hint {
+    display: block;
+    font-size: 12px;
+    color: #6c7781;
+    margin-top: 6px;
 }
 
 .featherlite-empty-state {

@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.0.7
+ * Version: 1.1.0
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.0.7';
+    private $version = '1.1.0';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -204,6 +204,8 @@ class Enhanced_S3_Media_Upload {
         add_action('wp_ajax_setup_aws_resources', array($this, 'ajax_setup_aws_resources'));
         add_action('wp_ajax_queue_s3_upload', array($this, 'ajax_queue_s3_upload'));
         add_action('wp_ajax_queue_s3_download', array($this, 'ajax_queue_s3_download'));
+        add_action('wp_ajax_optimize_media', array($this, 'ajax_optimize_media'));
+        add_action('wp_ajax_bulk_optimize_media', array($this, 'ajax_bulk_optimize_media'));
         add_action('wp_ajax_get_operation_status', array($this, 'ajax_get_operation_status'));
         add_action('wp_ajax_get_logs', array($this, 'ajax_get_logs'));
         add_action('wp_ajax_bulk_s3_upload', array($this, 'ajax_bulk_s3_upload'));
@@ -963,7 +965,16 @@ class Enhanced_S3_Media_Upload {
                 'alt_generating' => 'Generating alt tag...',
                 'alt_success' => 'Alt text updated',
                 'alt_error' => 'Unable to generate alt text',
-                'alt_skip' => 'Alt text already exists'
+                'alt_skip' => 'Alt text already exists',
+                'optimize_queueing' => 'Optimizing media...',
+                'optimize_success' => 'Optimization complete',
+                'optimize_error' => 'Unable to optimize media'
+            ),
+            'workflows' => array(
+                'optimize_enabled' => (bool) $this->optimize_media,
+                'offload_enabled' => (bool) $this->offload_media,
+                'cdn_enabled' => (bool) ($this->use_cloudfront && !empty($this->cloudfront_domain)),
+                'aws_configured' => (bool) $this->is_configured()
             ),
             'ai' => array(
                 'enabled' => (bool) $this->ai_alt_enabled,
@@ -1223,10 +1234,24 @@ class Enhanced_S3_Media_Upload {
         }
 
         echo '<div class="featherlite-scan-actions">';
-        echo '<label class="featherlite-select-all">'
+        echo '<label class="featherlite-select-all"'
             . '<input type="checkbox" class="featherlite-select-all-toggle"> Select all pending'
             . '</label>';
-        echo '<button type="button" class="button button-primary featherlite-optimize-selected is-hidden">Optimize Selected</button>';
+        if ($this->optimize_media) {
+            echo '<button type="button" class="button featherlite-optimize-selected is-hidden">Optimize Selected</button>';
+        }
+        if ($this->offload_media) {
+            $upload_label = $this->optimize_media ? 'Upload Selected to S3' : 'Upload Selected';
+            $disabled = $this->is_configured() ? '' : 'disabled="disabled"';
+            $upload_classes = 'button button-primary featherlite-upload-selected is-hidden';
+            if (!$this->is_configured()) {
+                $upload_classes .= ' is-disabled';
+            }
+            echo '<button type="button" class="' . $upload_classes . '" ' . $disabled . '>' . esc_html($upload_label) . '</button>';
+            if (!$this->is_configured()) {
+                echo '<p class="description featherlite-hint">' . esc_html__('Configure AWS credentials to enable uploads.', 'enhanced-s3') . '</p>';
+            }
+        }
         echo '</div>';
 
         echo '<div class="featherlite-scan-table-wrapper">';
@@ -1241,10 +1266,12 @@ class Enhanced_S3_Media_Upload {
         echo '<tbody>';
 
         foreach ($rows as $row) {
-            $disabled = $row['is_optimized'] ? 'disabled="disabled"' : '';
+            $disabled = $row['is_offloaded'] ? 'disabled="disabled"' : '';
+            $optimize_attr = $row['can_optimize'] ? '1' : '0';
+            $upload_attr = $row['can_upload'] ? '1' : '0';
             echo '<tr data-attachment-id="' . esc_attr($row['id']) . '">';
-            echo '<td class="column-cb">'
-                . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" ' . $disabled . '>'
+            echo '<td class="column-cb"'
+                . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" data-can-optimize="' . esc_attr($optimize_attr) . '" data-can-upload="' . esc_attr($upload_attr) . '" ' . $disabled . '>'
                 . '</td>';
             echo '<td class="column-thumb">' . wp_kses_post($row['thumbnail']) . '</td>';
             echo '<td>'
@@ -1255,7 +1282,17 @@ class Enhanced_S3_Media_Upload {
                 . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '">' . esc_html($row['status_label']) . '</span>'
                 . '</td>';
             echo '<td>';
-            echo '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '" ' . $disabled . '>Optimize</button>';
+            if ($row['can_optimize']) {
+                echo '<button type="button" class="button button-small enhanced-s3-optimize-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Optimize', 'enhanced-s3') . '</button>';
+            }
+            if ($row['can_upload'] && !$row['is_offloaded']) {
+                echo '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Upload to S3', 'enhanced-s3') . '</button>';
+            } elseif ($this->offload_media && !$this->is_configured()) {
+                echo '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
+            } elseif ($row['is_offloaded']) {
+                echo '<span class="featherlite-hint">' . esc_html__('Already on S3', 'enhanced-s3') . '</span>';
+            }
+            echo '<div class="featherlite-row-status" id="opt-status-' . esc_attr($row['id']) . '"></div>';
             echo '<div class="featherlite-row-status" id="status-' . esc_attr($row['id']) . '"></div>';
             echo '</td>';
             echo '</tr>';
@@ -1331,25 +1368,37 @@ class Enhanced_S3_Media_Upload {
 
             $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
             $log_status = isset($log_status_map[$attachment_id]) ? $log_status_map[$attachment_id] : '';
+            $local_optimized = get_post_meta($attachment_id, 'enhanced_s3_local_optimized', true);
             $status_slug = 'pending';
             $status_label = 'Pending';
+            $is_offloaded = false;
 
             if (!empty($s3_key) || $log_status === 'completed') {
-                $status_slug = 'optimized';
-                $status_label = 'Optimized';
+                $status_slug = 'offloaded';
+                $status_label = 'Offloaded to S3';
+                $is_offloaded = true;
             } elseif ($log_status === 'failed') {
                 $status_slug = 'failed';
                 $status_label = 'Failed';
+            } elseif (!empty($local_optimized)) {
+                $status_slug = 'optimized-local';
+                $status_label = 'Optimized (Local)';
             }
+
+            $mime_type = $attachment->post_mime_type ?: 'image/jpeg';
+            $is_image = strpos($mime_type, 'image/') === 0;
 
             $rows[] = array(
                 'id' => $attachment_id,
                 'title' => $title,
-                'subtitle' => $attachment->post_mime_type ?: 'image/jpeg',
+                'subtitle' => $mime_type,
                 'thumbnail' => $thumb,
                 'status_label' => $status_label,
                 'status_slug' => $status_slug,
-                'is_optimized' => ($status_slug === 'optimized')
+                'is_offloaded' => $is_offloaded,
+                'can_optimize' => ($this->optimize_media && $is_image),
+                'can_upload' => ($this->offload_media && $this->is_configured() && !$is_offloaded),
+                'is_image' => $is_image
             );
         }
 
@@ -2049,6 +2098,66 @@ class Enhanced_S3_Media_Upload {
         
         wp_send_json_success($results);
     }
+
+    public function ajax_optimize_media() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+
+        if (!current_user_can('upload_files')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        if (!$this->optimize_media) {
+            wp_send_json_error('Optimization is disabled in settings');
+        }
+
+        $attachment_id = intval($_POST['attachment_id'] ?? 0);
+        if (!$attachment_id) {
+            wp_send_json_error('Invalid attachment ID');
+        }
+
+        $result = $this->optimize_attachment_locally($attachment_id);
+        if (!empty($result['success'])) {
+            wp_send_json_success($result);
+        }
+
+        $error = isset($result['error']) ? $result['error'] : 'Unable to optimize media item';
+        wp_send_json_error($error);
+    }
+
+    public function ajax_bulk_optimize_media() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+
+        if (!current_user_can('upload_files')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        if (!$this->optimize_media) {
+            wp_send_json_error('Optimization is disabled in settings');
+        }
+
+        $attachment_ids = isset($_POST['attachment_ids']) ? array_map('intval', (array) $_POST['attachment_ids']) : array();
+        if (empty($attachment_ids)) {
+            wp_send_json_error('No media selected');
+        }
+
+        $summary = array(
+            'success' => 0,
+            'failed' => 0,
+            'errors' => array()
+        );
+
+        foreach ($attachment_ids as $attachment_id) {
+            $result = $this->optimize_attachment_locally($attachment_id);
+            if (!empty($result['success'])) {
+                $summary['success']++;
+            } else {
+                $summary['failed']++;
+                $summary['errors'][] = 'ID ' . $attachment_id . ': ' . ($result['error'] ?? 'Unable to optimize');
+            }
+        }
+
+        wp_send_json_success($summary);
+    }
     
     /**
      * AJAX: Setup AWS Resources
@@ -2317,8 +2426,173 @@ file_put_contents($temp_file, $test_content);
             wp_send_json_error('SQS test error: ' . $e->getMessage());
         }
     }
+
+    private function optimize_attachment_locally($attachment_id) {
+        $file_path = get_attached_file($attachment_id);
+        if (!$file_path || !file_exists($file_path)) {
+            return array('success' => false, 'error' => 'File not found on disk');
+        }
+
+        if (!wp_attachment_is_image($attachment_id)) {
+            return array('success' => true, 'skipped' => true, 'message' => 'Optimization skipped for non-image files');
+        }
+
+        if (!$this->auto_resize_images && !$this->compress_images) {
+            return array('success' => true, 'message' => 'No optimization rules enabled');
+        }
+
+        $original_size = filesize($file_path);
+        $processing_path = $file_path;
+        $temporary_files = array();
+        $resize_details = null;
+        $compression_details = null;
+
+        if ($this->auto_resize_images) {
+            $resize_details = $this->create_resized_copy_for_local_opt($attachment_id, $file_path);
+            if (!empty($resize_details['success'])) {
+                $processing_path = $resize_details['file_path'];
+                $temporary_files[] = $processing_path;
+                $this->update_attachment_dimensions_from_resize($attachment_id, $resize_details);
+            } elseif (!empty($resize_details['error'])) {
+                error_log('FeatherLift Media: Resize skipped for attachment ' . $attachment_id . ' - ' . $resize_details['error']);
+            }
+        }
+
+        if ($this->compress_images) {
+            $compressor_path = plugin_dir_path(__FILE__) . 'includes/image-compressor.php';
+            if (file_exists($compressor_path)) {
+                require_once $compressor_path;
+                $compressor = new Enhanced_S3_Image_Compressor($this->get_runtime_options());
+                if (!function_exists('wp_tempnam')) {
+                    require_once ABSPATH . 'wp-admin/includes/file.php';
+                }
+                $temp_file = wp_tempnam(basename($file_path));
+                if (!$temp_file) {
+                    $temp_file = tempnam(sys_get_temp_dir(), 'optimize_');
+                }
+                if ($temp_file) {
+                    $result = $compressor->compress_image($processing_path, $temp_file);
+                    if (!empty($result['success'])) {
+                        $processing_path = $temp_file;
+                        $compression_details = $result;
+                        $temporary_files[] = $temp_file;
+                    } else {
+                        error_log('FeatherLift Media: Compression failed for attachment ' . $attachment_id . ' - ' . ($result['error'] ?? 'Unknown error'));
+                        if (file_exists($temp_file)) {
+                            unlink($temp_file);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ($processing_path !== $file_path) {
+            if (!copy($processing_path, $file_path)) {
+                foreach ($temporary_files as $temp) {
+                    if ($temp !== $file_path && file_exists($temp)) {
+                        unlink($temp);
+                    }
+                }
+                return array('success' => false, 'error' => 'Unable to replace original file');
+            }
+        }
+
+        foreach ($temporary_files as $temp_file) {
+            if ($temp_file !== $file_path && file_exists($temp_file)) {
+                unlink($temp_file);
+            }
+        }
+
+        clearstatcache(true, $file_path);
+        $final_size = filesize($file_path);
+        $savings = ($original_size > 0 && $final_size > 0)
+            ? round((($original_size - $final_size) / $original_size) * 100, 1)
+            : 0;
+
+        update_post_meta($attachment_id, 'enhanced_s3_local_optimized', current_time('mysql'));
+        update_post_meta($attachment_id, 'enhanced_s3_local_optimized_size', $final_size);
+        update_post_meta($attachment_id, 'enhanced_s3_local_optimized_savings', $savings);
+
+        if ($compression_details) {
+            update_post_meta($attachment_id, 'enhanced_s3_compression_service', $compression_details['service_used'] ?? 'local');
+        }
+
+        return array(
+            'success' => true,
+            'resized' => !empty($resize_details['success']),
+            'compressed' => !empty($compression_details),
+            'original_size' => $original_size,
+            'final_size' => $final_size,
+            'savings_percent' => $savings
+        );
+    }
+
+    private function create_resized_copy_for_local_opt($attachment_id, $file_path) {
+        $max_width = isset($this->options['resize_max_width']) ? intval($this->options['resize_max_width']) : 0;
+        $max_height = isset($this->options['resize_max_height']) ? intval($this->options['resize_max_height']) : 0;
+
+        if ($max_width <= 0 && $max_height <= 0) {
+            return array('success' => false, 'error' => 'Resize bounds not set');
+        }
+
+        if (!function_exists('wp_get_image_editor')) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+        if (!function_exists('wp_tempnam')) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+
+        $editor = wp_get_image_editor($file_path);
+        if (is_wp_error($editor)) {
+            return array('success' => false, 'error' => $editor->get_error_message());
+        }
+
+        $resize_result = $editor->resize($max_width > 0 ? $max_width : null, $max_height > 0 ? $max_height : null, false);
+        if (is_wp_error($resize_result)) {
+            return array('success' => false, 'error' => $resize_result->get_error_message());
+        }
+
+        $temp_path = wp_tempnam(basename($file_path));
+        if (!$temp_path) {
+            $temp_path = tempnam(sys_get_temp_dir(), 'resize_');
+        }
+        if (!$temp_path) {
+            return array('success' => false, 'error' => 'Unable to create temp file for resize');
+        }
+
+        $saved = $editor->save($temp_path);
+        if (is_wp_error($saved)) {
+            unlink($temp_path);
+            return array('success' => false, 'error' => $saved->get_error_message());
+        }
+
+        return array(
+            'success' => true,
+            'file_path' => $temp_path,
+            'width' => $saved['width'] ?? null,
+            'height' => $saved['height'] ?? null
+        );
+    }
+
+    private function update_attachment_dimensions_from_resize($attachment_id, $resize_details) {
+        if (empty($resize_details['width']) || empty($resize_details['height'])) {
+            return;
+        }
+
+        $metadata = wp_get_attachment_metadata($attachment_id);
+        if (empty($metadata)) {
+            return;
+        }
+
+        $metadata['width'] = $resize_details['width'];
+        $metadata['height'] = $resize_details['height'];
+        wp_update_attachment_metadata($attachment_id, $metadata);
+    }
     public function add_media_fields($form_fields, $post) {
-        if (!$this->is_configured()) {
+        $show_optimize = $this->optimize_media && wp_attachment_is_image($post->ID);
+        $show_offload = $this->offload_media;
+
+        if (!$show_optimize && !$show_offload) {
             return $form_fields;
         }
         
@@ -2329,23 +2603,48 @@ file_put_contents($temp_file, $test_content);
         $description_preview = $attachment_description !== ''
             ? wp_trim_words($attachment_description, 35, '…')
             : 'Not set';
+        $optimized_at = get_post_meta($post->ID, 'enhanced_s3_local_optimized', true);
         
         ob_start();
         ?>
         <div class="enhanced-s3-controls">
-            <?php if ($is_on_s3): ?>
-                <p><strong>Status:</strong> <span style="color: green;">✓ On S3</span></p>
-                <p><strong>S3 Key:</strong> <?php echo esc_html($s3_key); ?></p>
-                <button type="button" class="button" onclick="enhancedS3.queueDownload(<?php echo $post->ID; ?>)">
-                    Download from S3
-                </button>
-            <?php else: ?>
-                <p><strong>Status:</strong> <span style="color: orange;">Local only</span></p>
-                <button type="button" class="button button-primary" onclick="enhancedS3.queueUpload(<?php echo $post->ID; ?>)">
-                    Upload to S3
-                </button>
+            <?php if ($show_optimize): ?>
+                <div class="enhanced-s3-block">
+                    <p><strong>Local Optimization:</strong> <?php echo $optimized_at ? '<span style="color:green;">Last run ' . esc_html(human_time_diff(strtotime($optimized_at), current_time('timestamp'))) . ' ago</span>' : '<span style="color:#646970;">Not yet optimized</span>'; ?></p>
+                    <button type="button" class="button enhanced-s3-optimize-btn" data-attachment-id="<?php echo $post->ID; ?>">
+                        Optimize Now
+                    </button>
+                    <div class="operation-status" id="opt-status-<?php echo $post->ID; ?>" style="margin-top: 8px;"></div>
+                </div>
             <?php endif; ?>
-            <div class="operation-status" id="status-<?php echo $post->ID; ?>" style="margin-top: 10px;"></div>
+
+            <?php if ($show_offload): ?>
+                <div class="enhanced-s3-block">
+                    <p><strong>S3 Offload:</strong>
+                        <?php if ($is_on_s3): ?>
+                            <span style="color: green;">✓ On S3</span>
+                        <?php else: ?>
+                            <span style="color: orange;">Local only</span>
+                        <?php endif; ?>
+                    </p>
+                    <?php if ($this->is_configured()): ?>
+                        <?php if ($is_on_s3): ?>
+                            <p><strong>S3 Key:</strong> <?php echo esc_html($s3_key); ?></p>
+                            <button type="button" class="button" onclick="enhancedS3.queueDownload(<?php echo $post->ID; ?>)">
+                                Download from S3
+                            </button>
+                        <?php else: ?>
+                            <button type="button" class="button button-primary" onclick="enhancedS3.queueUpload(<?php echo $post->ID; ?>)">
+                                Upload to S3
+                            </button>
+                        <?php endif; ?>
+                    <?php else: ?>
+                        <p class="description">Add AWS credentials in FeatherLift settings to enable offloading.</p>
+                    <?php endif; ?>
+                    <div class="operation-status" id="status-<?php echo $post->ID; ?>" style="margin-top: 10px;"></div>
+                </div>
+            <?php endif; ?>
+
             <?php if ($this->ai_alt_enabled && wp_attachment_is_image($post->ID)): ?>
                 <hr />
                 <div class="enhanced-s3-alt-tools">
@@ -2356,6 +2655,7 @@ file_put_contents($temp_file, $test_content);
                     <div class="enhanced-s3-alt-status" id="alt-status-<?php echo $post->ID; ?>" style="margin-top:8px;"></div>
                 </div>
             <?php endif; ?>
+
             <hr />
             <div class="enhanced-s3-description-preview">
                 <p><strong>Generated Description:</strong></p>
