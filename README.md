@@ -31,6 +31,9 @@ FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that
 5. GitHub Actions (`.github/workflows/release.yml`) builds the distributable ZIP and publishes it as a GitHub Release.
 
 ## Release Notes
+### v1.1.3 — 2026-02-23
+- Fixed FeatherLite optimizations that silently “succeeded” when both resize and compression skipped the file by surfacing the underlying errors in the UI.
+
 ### v1.1.2 — 2026-02-23
 - Reordered the settings experience so the quick-start checklist, IAM policy reference, and AWS summary always stay visible above the workflow cards, plus refreshed the surrounding styles.
 - Added FeatherLite pagination with AJAX-powered row loading, bulk selection controls, and helpful disabled states so large media libraries remain manageable.

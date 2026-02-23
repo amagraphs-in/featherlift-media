@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.2
+ * Version: 1.1.3
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.2';
+    private $version = '1.1.3';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -2566,19 +2566,26 @@ file_put_contents($temp_file, $test_content);
         $temporary_files = array();
         $resize_details = null;
         $compression_details = null;
+        $resize_attempted = false;
+        $compression_attempted = false;
+        $resize_error = '';
+        $compression_error = '';
 
         if ($this->auto_resize_images) {
+            $resize_attempted = true;
             $resize_details = $this->create_resized_copy_for_local_opt($attachment_id, $file_path);
             if (!empty($resize_details['success'])) {
                 $processing_path = $resize_details['file_path'];
                 $temporary_files[] = $processing_path;
                 $this->update_attachment_dimensions_from_resize($attachment_id, $resize_details);
             } elseif (!empty($resize_details['error'])) {
-                error_log('FeatherLift Media: Resize skipped for attachment ' . $attachment_id . ' - ' . $resize_details['error']);
+                $resize_error = $resize_details['error'];
+                error_log('FeatherLift Media: Resize skipped for attachment ' . $attachment_id . ' - ' . $resize_error);
             }
         }
 
         if ($this->compress_images) {
+            $compression_attempted = true;
             $compressor_path = plugin_dir_path(__FILE__) . 'includes/image-compressor.php';
             if (file_exists($compressor_path)) {
                 require_once $compressor_path;
@@ -2597,13 +2604,41 @@ file_put_contents($temp_file, $test_content);
                         $compression_details = $result;
                         $temporary_files[] = $temp_file;
                     } else {
-                        error_log('FeatherLift Media: Compression failed for attachment ' . $attachment_id . ' - ' . ($result['error'] ?? 'Unknown error'));
+                        $compression_error = $result['error'] ?? 'Unknown error';
+                        error_log('FeatherLift Media: Compression failed for attachment ' . $attachment_id . ' - ' . $compression_error);
                         if (file_exists($temp_file)) {
                             unlink($temp_file);
                         }
                     }
                 }
             }
+        }
+
+        $resize_success = !empty($resize_details['success']);
+        $compression_success = !empty($compression_details);
+
+        if (!$resize_success && !$compression_success) {
+            $error_messages = array();
+            if ($compression_attempted && $compression_error) {
+                $error_messages[] = 'Compression failed: ' . $compression_error;
+            }
+            if ($resize_attempted && $resize_error) {
+                $error_messages[] = 'Resize failed: ' . $resize_error;
+            }
+            if (empty($error_messages)) {
+                $error_messages[] = 'No optimization rules were applied to this file.';
+            }
+
+            foreach ($temporary_files as $temp_file) {
+                if ($temp_file !== $file_path && file_exists($temp_file)) {
+                    unlink($temp_file);
+                }
+            }
+
+            return array(
+                'success' => false,
+                'error' => implode(' ', $error_messages)
+            );
         }
 
         if ($processing_path !== $file_path) {
