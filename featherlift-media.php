@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.0
+ * Version: 1.1.1
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.0';
+    private $version = '1.1.1';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -1269,7 +1269,7 @@ class Enhanced_S3_Media_Upload {
             $disabled = $row['is_offloaded'] ? 'disabled="disabled"' : '';
             $optimize_attr = $row['can_optimize'] ? '1' : '0';
             $upload_attr = $row['can_upload'] ? '1' : '0';
-            echo '<tr data-attachment-id="' . esc_attr($row['id']) . '">';
+            echo '<tr data-attachment-id="' . esc_attr($row['id']) . '" data-status-slug="' . esc_attr($row['status_slug']) . '">';
             echo '<td class="column-cb"'
                 . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" data-can-optimize="' . esc_attr($optimize_attr) . '" data-can-upload="' . esc_attr($upload_attr) . '" ' . $disabled . '>'
                 . '</td>';
@@ -1279,7 +1279,7 @@ class Enhanced_S3_Media_Upload {
                 . '<span class="featherlite-media-meta">' . esc_html($row['subtitle']) . '</span>'
                 . '</td>';
             echo '<td>'
-                . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '">' . esc_html($row['status_label']) . '</span>'
+                . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '" data-status-label="' . esc_attr($row['status_label']) . '">' . esc_html($row['status_label']) . '</span>'
                 . '</td>';
             echo '<td>';
             if ($row['can_optimize']) {
@@ -2117,7 +2117,7 @@ class Enhanced_S3_Media_Upload {
 
         $result = $this->optimize_attachment_locally($attachment_id);
         if (!empty($result['success'])) {
-            wp_send_json_success($result);
+            wp_send_json_success($this->prepare_local_optimization_response($attachment_id, $result));
         }
 
         $error = isset($result['error']) ? $result['error'] : 'Unable to optimize media item';
@@ -2143,13 +2143,15 @@ class Enhanced_S3_Media_Upload {
         $summary = array(
             'success' => 0,
             'failed' => 0,
-            'errors' => array()
+            'errors' => array(),
+            'items' => array()
         );
 
         foreach ($attachment_ids as $attachment_id) {
             $result = $this->optimize_attachment_locally($attachment_id);
             if (!empty($result['success'])) {
                 $summary['success']++;
+                $summary['items'][] = $this->prepare_local_optimization_response($attachment_id, $result);
             } else {
                 $summary['failed']++;
                 $summary['errors'][] = 'ID ' . $attachment_id . ': ' . ($result['error'] ?? 'Unable to optimize');
@@ -2438,7 +2440,10 @@ file_put_contents($temp_file, $test_content);
         }
 
         if (!$this->auto_resize_images && !$this->compress_images) {
-            return array('success' => true, 'message' => 'No optimization rules enabled');
+            return array(
+                'success' => false,
+                'error' => 'Enable resizing or compression rules in FeatherLift Media settings before optimizing.'
+            );
         }
 
         $original_size = filesize($file_path);
@@ -2509,7 +2514,10 @@ file_put_contents($temp_file, $test_content);
             ? round((($original_size - $final_size) / $original_size) * 100, 1)
             : 0;
 
-        update_post_meta($attachment_id, 'enhanced_s3_local_optimized', current_time('mysql'));
+        $optimized_at = current_time('mysql');
+        $optimized_timestamp = current_time('timestamp');
+
+        update_post_meta($attachment_id, 'enhanced_s3_local_optimized', $optimized_at);
         update_post_meta($attachment_id, 'enhanced_s3_local_optimized_size', $final_size);
         update_post_meta($attachment_id, 'enhanced_s3_local_optimized_savings', $savings);
 
@@ -2523,7 +2531,10 @@ file_put_contents($temp_file, $test_content);
             'compressed' => !empty($compression_details),
             'original_size' => $original_size,
             'final_size' => $final_size,
-            'savings_percent' => $savings
+            'savings_percent' => $savings,
+            'optimized_at' => $optimized_at,
+            'optimized_timestamp' => $optimized_timestamp,
+            'summary' => $this->build_local_optimization_summary($original_size, $final_size, $savings)
         );
     }
 
@@ -2588,6 +2599,43 @@ file_put_contents($temp_file, $test_content);
         $metadata['height'] = $resize_details['height'];
         wp_update_attachment_metadata($attachment_id, $metadata);
     }
+
+    private function build_local_optimization_summary($original_size, $final_size, $savings_percent) {
+        $before = $this->format_file_size($original_size ?: 0);
+        $after = $this->format_file_size($final_size ?: 0);
+
+        if ($savings_percent > 0) {
+            return sprintf('Saved %s%% (%s → %s)', $savings_percent, $before, $after);
+        }
+
+        if ($before !== $after) {
+            return sprintf('Updated file size from %s to %s', $before, $after);
+        }
+
+        return sprintf('Re-saved file (%s)', $after);
+    }
+
+    private function prepare_local_optimization_response($attachment_id, $result) {
+        $timestamp = isset($result['optimized_timestamp'])
+            ? (int) $result['optimized_timestamp']
+            : current_time('timestamp');
+
+        $result['attachment_id'] = $attachment_id;
+        $result['status_label'] = __('Optimized (Local)', 'enhanced-s3');
+        $result['status_slug'] = 'optimized-local';
+        $result['optimized_human'] = human_time_diff($timestamp, current_time('timestamp'));
+        $result['optimized_at_display'] = date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $timestamp);
+
+        if (empty($result['summary'])) {
+            $result['summary'] = $this->build_local_optimization_summary(
+                isset($result['original_size']) ? $result['original_size'] : 0,
+                isset($result['final_size']) ? $result['final_size'] : 0,
+                isset($result['savings_percent']) ? $result['savings_percent'] : 0
+            );
+        }
+
+        return $result;
+    }
     public function add_media_fields($form_fields, $post) {
         $show_optimize = $this->optimize_media && wp_attachment_is_image($post->ID);
         $show_offload = $this->offload_media;
@@ -2604,13 +2652,16 @@ file_put_contents($temp_file, $test_content);
             ? wp_trim_words($attachment_description, 35, '…')
             : 'Not set';
         $optimized_at = get_post_meta($post->ID, 'enhanced_s3_local_optimized', true);
+        $optimized_summary = $optimized_at
+            ? sprintf('Last run %s ago', human_time_diff(strtotime($optimized_at), current_time('timestamp')))
+            : 'Not yet optimized';
         
         ob_start();
         ?>
         <div class="enhanced-s3-controls">
             <?php if ($show_optimize): ?>
                 <div class="enhanced-s3-block">
-                    <p><strong>Local Optimization:</strong> <?php echo $optimized_at ? '<span style="color:green;">Last run ' . esc_html(human_time_diff(strtotime($optimized_at), current_time('timestamp'))) . ' ago</span>' : '<span style="color:#646970;">Not yet optimized</span>'; ?></p>
+                    <p><strong>Local Optimization:</strong> <span class="enhanced-s3-optimized-summary" id="optimized-summary-<?php echo $post->ID; ?>" data-default="Not yet optimized"><?php echo esc_html($optimized_summary); ?></span></p>
                     <button type="button" class="button enhanced-s3-optimize-btn" data-attachment-id="<?php echo $post->ID; ?>">
                         Optimize Now
                     </button>

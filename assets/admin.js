@@ -173,21 +173,24 @@
                     nonce: enhancedS3Ajax.nonce
                 }
             }).done(function(response) {
-                if ($statusArea && $statusArea.length) {
-                    if (response.success) {
-                        var summary = response.data;
-                        var message = 'Optimized ' + summary.success + ' file(s)';
+                if (response && response.success) {
+                    var summary = response.data || {};
+                    if (Array.isArray(summary.items)) {
+                        summary.items.forEach(function(item) {
+                            enhancedS3.handleOptimizationSuccess(item.attachment_id, item);
+                        });
+                    }
+
+                    if ($statusArea && $statusArea.length) {
+                        var message = 'Optimized ' + (summary.success || 0) + ' file(s)';
                         if (summary.failed) {
                             message += ' • ' + summary.failed + ' failed';
                         }
                         $statusArea.html('<div class="notice notice-success inline"><p>' + message + '</p></div>');
-                        setTimeout(function() {
-                            window.location.reload();
-                        }, 1500);
-                    } else {
-                        var err = typeof response.data === 'string' ? response.data : 'Unable to queue files.';
-                        $statusArea.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
                     }
+                } else if ($statusArea && $statusArea.length) {
+                    var err = response && typeof response.data === 'string' ? response.data : 'Unable to queue files.';
+                    $statusArea.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
                 }
             }).fail(function() {
                 if ($statusArea && $statusArea.length) {
@@ -349,21 +352,13 @@
                     nonce: enhancedS3Ajax.nonce
                 }
             }).done(function(response) {
-                if ($statusDiv.length) {
-                    if (response.success) {
-                        $statusDiv.html('<div class="notice notice-success inline"><p>' + (enhancedS3Ajax.strings.optimize_success || 'Optimization complete') + '</p></div>');
-                        setTimeout(function() {
-                            window.location.reload();
-                        }, 1200);
-                    } else {
-                        var err = typeof response.data === 'string' ? response.data : (enhancedS3Ajax.strings.optimize_error || 'Unable to optimize');
-                        $statusDiv.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
-                    }
+                if (response && response.success) {
+                    enhancedS3.handleOptimizationSuccess(attachmentId, response.data, $statusDiv);
+                } else {
+                    enhancedS3.renderOptimizationError($statusDiv, response);
                 }
-            }).fail(function() {
-                if ($statusDiv.length) {
-                    $statusDiv.html('<div class="notice notice-error inline"><p>' + (enhancedS3Ajax.strings.optimize_error || 'Unable to optimize') + '</p></div>');
-                }
+            }).fail(function(xhr) {
+                enhancedS3.renderOptimizationError($statusDiv, xhr && xhr.responseJSON ? xhr.responseJSON : null);
             });
         },
 
@@ -655,6 +650,116 @@
                     enhancedS3.loadLogs();
                 }
             }, 30000);
+        },
+
+        handleOptimizationSuccess: function(attachmentId, payload, $statusDiv) {
+            enhancedS3.renderOptimizationNotice(attachmentId, payload, $statusDiv);
+            enhancedS3.updateFeatherliteRow(attachmentId, payload);
+            enhancedS3.updateMediaPanelOptimization(attachmentId, payload);
+        },
+
+        renderOptimizationNotice: function(attachmentId, payload, $statusDiv) {
+            var $target = $statusDiv && $statusDiv.length ? $statusDiv : $('#opt-status-' + attachmentId);
+            if (!$target.length) {
+                return;
+            }
+            $target.html('<div class="notice notice-success inline"><p>' + enhancedS3.buildOptimizationMessage(payload) + '</p></div>');
+        },
+
+        renderOptimizationError: function($statusDiv, response) {
+            if (!$statusDiv || !$statusDiv.length) {
+                return;
+            }
+
+            var fallback = enhancedS3Ajax.strings.optimize_error || 'Unable to optimize';
+            var err = fallback;
+
+            if (response) {
+                if (typeof response.data === 'string') {
+                    err = response.data;
+                } else if (response.data && response.data.error) {
+                    err = response.data.error;
+                } else if (response.error) {
+                    err = response.error;
+                }
+            }
+
+            $statusDiv.html('<div class="notice notice-error inline"><p>' + err + '</p></div>');
+        },
+
+        buildOptimizationMessage: function(payload) {
+            if (payload) {
+                if (payload.summary) {
+                    return payload.summary;
+                }
+                if (payload.message) {
+                    return payload.message;
+                }
+            }
+
+            var base = enhancedS3Ajax.strings.optimize_success || 'Optimization complete';
+            if (payload && typeof payload.savings_percent !== 'undefined') {
+                var percent = enhancedS3.formatPercent(payload.savings_percent);
+                if (percent) {
+                    base += ' • ' + percent + '% saved';
+                }
+            }
+            return base;
+        },
+
+        updateMediaPanelOptimization: function(attachmentId, payload) {
+            var $summary = $('#optimized-summary-' + attachmentId);
+            if (!$summary.length) {
+                return;
+            }
+
+            var label;
+            if (payload && payload.optimized_human) {
+                label = 'Last run ' + payload.optimized_human + ' ago';
+            } else {
+                label = 'Optimized just now';
+            }
+
+            if (payload && payload.optimized_at_display) {
+                label += ' (' + payload.optimized_at_display + ')';
+            }
+
+            $summary.text(label).addClass('is-optimized');
+        },
+
+        updateFeatherliteRow: function(attachmentId, payload) {
+            var $row = $('.featherlite-scan-table tr[data-attachment-id="' + attachmentId + '"]');
+            if (!$row.length) {
+                return;
+            }
+
+            var slug = payload && payload.status_slug ? payload.status_slug : 'optimized-local';
+            var label = payload && payload.status_label ? payload.status_label : 'Optimized (Local)';
+
+            $row.attr('data-status-slug', slug);
+
+            var $badge = $row.find('.featherlite-status');
+            if ($badge.length) {
+                enhancedS3.stripStatusClasses($badge);
+                $badge.addClass('badge-' + slug).attr('data-status-label', label).text(label);
+            }
+        },
+
+        stripStatusClasses: function($el) {
+            var existing = ($el.attr('class') || '').split(' ');
+            existing.forEach(function(cls) {
+                if (cls.indexOf('badge-') === 0) {
+                    $el.removeClass(cls);
+                }
+            });
+        },
+
+        formatPercent: function(value) {
+            var num = parseFloat(value);
+            if (isNaN(num) || num <= 0) {
+                return '';
+            }
+            return num % 1 === 0 ? String(num) : num.toFixed(1);
         },
 
         generateAltTag: function(attachmentId, $trigger) {
