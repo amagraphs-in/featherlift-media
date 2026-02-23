@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.1
+ * Version: 1.1.2
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.1';
+    private $version = '1.1.2';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -208,6 +208,7 @@ class Enhanced_S3_Media_Upload {
         add_action('wp_ajax_bulk_optimize_media', array($this, 'ajax_bulk_optimize_media'));
         add_action('wp_ajax_get_operation_status', array($this, 'ajax_get_operation_status'));
         add_action('wp_ajax_get_logs', array($this, 'ajax_get_logs'));
+        add_action('wp_ajax_get_media_scan_rows', array($this, 'ajax_get_media_scan_rows'));
         add_action('wp_ajax_bulk_s3_upload', array($this, 'ajax_bulk_s3_upload'));
         add_action('wp_ajax_bulk_s3_download', array($this, 'ajax_bulk_s3_download'));
         add_action('wp_ajax_manual_upload_all', array($this, 'ajax_manual_upload_all'));
@@ -357,6 +358,37 @@ class Enhanced_S3_Media_Upload {
         }
 
         wp_send_json_success($summary);
+    }
+
+    /**
+     * AJAX pagination for the FeatherLite scan table
+     */
+    public function ajax_get_media_scan_rows() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+
+        if (!current_user_can('upload_files')) {
+            wp_send_json_error(__('Insufficient permissions.', 'enhanced-s3'));
+        }
+
+        $page = isset($_POST['page']) ? intval($_POST['page']) : 1;
+        $per_page = isset($_POST['per_page']) ? intval($_POST['per_page']) : 20;
+        $context = isset($_POST['context']) ? sanitize_key(wp_unslash($_POST['context'])) : '';
+
+        $result = $this->get_media_scan_rows(array(
+            'page' => $page,
+            'per_page' => $per_page,
+            'context' => $context
+        ));
+
+        wp_send_json_success(array(
+            'rows_html' => $this->build_featherlite_rows_html($result['rows']),
+            'meta' => array(
+                'page' => $result['page'],
+                'per_page' => $result['per_page'],
+                'total' => $result['total'],
+                'total_pages' => $result['total_pages']
+            )
+        ));
     }
 
     /**
@@ -1217,16 +1249,31 @@ class Enhanced_S3_Media_Upload {
      * Render the FeatherLite scan table used across admin pages
      */
     private function render_media_scan_box($context = '') {
-        $rows = $this->get_media_scan_rows();
         $context = sanitize_key($context);
-        echo '<div class="featherlite-scan" data-context="' . esc_attr($context) . '">';
+        $per_page = absint(apply_filters('featherlite_media_scan_per_page', 20, $context));
+        $per_page = absint(apply_filters('featherlite_media_scan_limit', $per_page));
+        if ($per_page <= 0) {
+            $per_page = 20;
+        }
+
+        $data = $this->get_media_scan_rows(array(
+            'page' => 1,
+            'per_page' => $per_page,
+            'context' => $context
+        ));
+
+        $rows = $data['rows'];
+        $page = (int) $data['page'];
+        $total_pages = (int) $data['total_pages'];
+
+        echo '<div class="featherlite-scan" data-context="' . esc_attr($context) . '" data-page="' . esc_attr($page) . '" data-total-pages="' . esc_attr($total_pages) . '" data-per-page="' . esc_attr($data['per_page']) . '">';
         echo '<div class="featherlite-scan-heading">';
         echo '<h2>FeatherLite Optimization Box</h2>';
         echo '<p>We scan your latest uploads so you can batch optimize or retry problem files without leaving this page.</p>';
         echo '</div>';
 
         if (empty($rows)) {
-            echo '<div class="featherlite-empty-state">'
+            echo '<div class="featherlite-empty-state"'
                 . '<p>No recent media uploads found yet. Once you add new files they will appear here for quick optimization.</p>'
                 . '</div>';
             echo '</div>';
@@ -1234,20 +1281,21 @@ class Enhanced_S3_Media_Upload {
         }
 
         echo '<div class="featherlite-scan-actions">';
-        echo '<label class="featherlite-select-all"'
-            . '<input type="checkbox" class="featherlite-select-all-toggle"> Select all pending'
+        echo '<label class="featherlite-select-all">'
+            . '<input type="checkbox" class="featherlite-select-all-toggle"> '
+            . esc_html__('Select all visible', 'enhanced-s3')
             . '</label>';
         if ($this->optimize_media) {
-            echo '<button type="button" class="button featherlite-optimize-selected is-hidden">Optimize Selected</button>';
+            echo '<button type="button" class="button featherlite-optimize-selected is-hidden">' . esc_html__('Optimize Selected', 'enhanced-s3') . '</button>';
         }
         if ($this->offload_media) {
-            $upload_label = $this->optimize_media ? 'Upload Selected to S3' : 'Upload Selected';
+            $upload_label = $this->optimize_media ? esc_html__('Upload Selected to S3', 'enhanced-s3') : esc_html__('Upload Selected', 'enhanced-s3');
             $disabled = $this->is_configured() ? '' : 'disabled="disabled"';
             $upload_classes = 'button button-primary featherlite-upload-selected is-hidden';
             if (!$this->is_configured()) {
                 $upload_classes .= ' is-disabled';
             }
-            echo '<button type="button" class="' . $upload_classes . '" ' . $disabled . '>' . esc_html($upload_label) . '</button>';
+            echo '<button type="button" class="' . $upload_classes . '" ' . $disabled . '>' . $upload_label . '</button>';
             if (!$this->is_configured()) {
                 echo '<p class="description featherlite-hint">' . esc_html__('Configure AWS credentials to enable uploads.', 'enhanced-s3') . '</p>';
             }
@@ -1257,75 +1305,73 @@ class Enhanced_S3_Media_Upload {
         echo '<div class="featherlite-scan-table-wrapper">';
         echo '<table class="wp-list-table widefat fixed striped featherlite-scan-table">';
         echo '<thead><tr>';
-        echo '<th class="column-cb"><span class="screen-reader-text">Select file</span></th>';
-        echo '<th>Preview</th>';
-        echo '<th>Media</th>';
-        echo '<th>Status</th>';
-        echo '<th class="column-actions">Actions</th>';
+        echo '<th class="column-cb"><span class="screen-reader-text">' . esc_html__('Select file', 'enhanced-s3') . '</span></th>';
+        echo '<th>' . esc_html__('Preview', 'enhanced-s3') . '</th>';
+        echo '<th>' . esc_html__('Media', 'enhanced-s3') . '</th>';
+        echo '<th>' . esc_html__('Status', 'enhanced-s3') . '</th>';
+        echo '<th class="column-actions">' . esc_html__('Actions', 'enhanced-s3') . '</th>';
         echo '</tr></thead>';
-        echo '<tbody>';
+        echo '<tbody>' . $this->build_featherlite_rows_html($rows) . '</tbody>';
+        echo '</table></div>';
 
-        foreach ($rows as $row) {
-            $disabled = $row['is_offloaded'] ? 'disabled="disabled"' : '';
-            $optimize_attr = $row['can_optimize'] ? '1' : '0';
-            $upload_attr = $row['can_upload'] ? '1' : '0';
-            echo '<tr data-attachment-id="' . esc_attr($row['id']) . '" data-status-slug="' . esc_attr($row['status_slug']) . '">';
-            echo '<td class="column-cb"'
-                . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" data-can-optimize="' . esc_attr($optimize_attr) . '" data-can-upload="' . esc_attr($upload_attr) . '" ' . $disabled . '>'
-                . '</td>';
-            echo '<td class="column-thumb">' . wp_kses_post($row['thumbnail']) . '</td>';
-            echo '<td>'
-                . '<span class="featherlite-media-title">' . esc_html($row['title']) . '</span>'
-                . '<span class="featherlite-media-meta">' . esc_html($row['subtitle']) . '</span>'
-                . '</td>';
-            echo '<td>'
-                . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '" data-status-label="' . esc_attr($row['status_label']) . '">' . esc_html($row['status_label']) . '</span>'
-                . '</td>';
-            echo '<td>';
-            if ($row['can_optimize']) {
-                echo '<button type="button" class="button button-small enhanced-s3-optimize-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Optimize', 'enhanced-s3') . '</button>';
-            }
-            if ($row['can_upload'] && !$row['is_offloaded']) {
-                echo '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Upload to S3', 'enhanced-s3') . '</button>';
-            } elseif ($this->offload_media && !$this->is_configured()) {
-                echo '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
-            } elseif ($row['is_offloaded']) {
-                echo '<span class="featherlite-hint">' . esc_html__('Already on S3', 'enhanced-s3') . '</span>';
-            }
-            echo '<div class="featherlite-row-status" id="opt-status-' . esc_attr($row['id']) . '"></div>';
-            echo '<div class="featherlite-row-status" id="status-' . esc_attr($row['id']) . '"></div>';
-            echo '</td>';
-            echo '</tr>';
-        }
+        $pagination_style = $total_pages > 1 ? '' : ' style="display:none;"';
+        echo '<div class="featherlite-pagination" role="navigation"' . $pagination_style . '>';
+        $prev_disabled = $page <= 1 ? 'disabled="disabled"' : '';
+        $next_disabled = $page >= $total_pages ? 'disabled="disabled"' : '';
+        echo '<button type="button" class="button featherlite-page-prev" ' . $prev_disabled . '>' . esc_html__('Previous', 'enhanced-s3') . '</button>';
+        echo '<span class="featherlite-page-status">' . sprintf(esc_html__('Page %1$d of %2$d', 'enhanced-s3'), $page, $total_pages) . '</span>';
+        echo '<button type="button" class="button featherlite-page-next" ' . $next_disabled . '>' . esc_html__('Next', 'enhanced-s3') . '</button>';
+        echo '</div>';
 
-        echo '</tbody></table></div>';
         echo '<div class="featherlite-bulk-status" aria-live="polite"></div>';
         echo '</div>';
     }
-
     /**
      * Collect recent media rows for the scan box
      */
-    private function get_media_scan_rows($limit = 8) {
-        $limit = absint(apply_filters('featherlite_media_scan_limit', $limit));
-        if ($limit <= 0) {
-            $limit = 8;
-        }
+    private function get_media_scan_rows($args = array()) {
+        $defaults = array(
+            'page' => 1,
+            'per_page' => 20,
+            'context' => ''
+        );
+        $args = wp_parse_args($args, $defaults);
 
-        $query = new WP_Query(array(
+        $page = max(1, absint($args['page']));
+        $per_page = max(5, min(100, absint($args['per_page'])));
+
+        $query_args = array(
             'post_type'      => 'attachment',
             'post_status'    => 'inherit',
             'post_mime_type' => 'image',
-            'posts_per_page' => $limit,
+            'posts_per_page' => $per_page,
             'orderby'        => 'date',
             'order'          => 'DESC',
-            'no_found_rows'  => true,
+            'no_found_rows'  => false,
+            'paged'          => $page,
             'fields'         => 'all'
-        ));
+        );
+
+        $query = new WP_Query($query_args);
+        $total = (int) $query->found_posts;
+        $total_pages = max(1, (int) ceil($total / $per_page));
+
+        if ($page > $total_pages && $total > 0) {
+            wp_reset_postdata();
+            $page = $total_pages;
+            $query_args['paged'] = $page;
+            $query = new WP_Query($query_args);
+        }
 
         if (!$query->have_posts()) {
             wp_reset_postdata();
-            return array();
+            return array(
+                'rows' => array(),
+                'page' => $page,
+                'per_page' => $per_page,
+                'total' => $total,
+                'total_pages' => $total_pages
+            );
         }
 
         $attachments = $query->posts;
@@ -1402,16 +1448,151 @@ class Enhanced_S3_Media_Upload {
             );
         }
 
-        return $rows;
+        return array(
+            'rows' => $rows,
+            'page' => $page,
+            'per_page' => $per_page,
+            'total' => $total,
+            'total_pages' => $total_pages
+        );
+    }
+
+    private function build_featherlite_rows_html($rows) {
+        if (empty($rows)) {
+            return '';
+        }
+
+        $html = '';
+        foreach ($rows as $row) {
+            $disabled = $row['is_offloaded'] ? 'disabled="disabled"' : '';
+            $optimize_attr = $row['can_optimize'] ? '1' : '0';
+            $upload_attr = $row['can_upload'] ? '1' : '0';
+            $html .= '<tr data-attachment-id="' . esc_attr($row['id']) . '" data-status-slug="' . esc_attr($row['status_slug']) . '">';
+            $html .= '<td class="column-cb">'
+                . '<input type="checkbox" class="featherlite-row-select" value="' . esc_attr($row['id']) . '" data-status="' . esc_attr($row['status_slug']) . '" data-can-optimize="' . esc_attr($optimize_attr) . '" data-can-upload="' . esc_attr($upload_attr) . '" ' . $disabled . '>'
+                . '</td>';
+            $html .= '<td class="column-thumb">' . wp_kses_post($row['thumbnail']) . '</td>';
+            $html .= '<td>'
+                . '<span class="featherlite-media-title">' . esc_html($row['title']) . '</span>'
+                . '<span class="featherlite-media-meta">' . esc_html($row['subtitle']) . '</span>'
+                . '</td>';
+            $html .= '<td>'
+                . '<span class="featherlite-status badge-' . esc_attr($row['status_slug']) . '" data-status-label="' . esc_attr($row['status_label']) . '">' . esc_html($row['status_label']) . '</span>'
+                . '</td>';
+            $html .= '<td>';
+            if ($row['can_optimize']) {
+                $html .= '<button type="button" class="button button-small enhanced-s3-optimize-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Optimize', 'enhanced-s3') . '</button>';
+            }
+            if ($row['can_upload'] && !$row['is_offloaded']) {
+                $html .= '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Upload to S3', 'enhanced-s3') . '</button>';
+            } elseif ($this->offload_media && !$this->is_configured()) {
+                $html .= '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
+            } elseif ($row['is_offloaded']) {
+                $html .= '<span class="featherlite-hint">' . esc_html__('Already on S3', 'enhanced-s3') . '</span>';
+            }
+            $html .= '<div class="featherlite-row-status" id="opt-status-' . esc_attr($row['id']) . '"></div>';
+            $html .= '<div class="featherlite-row-status" id="status-' . esc_attr($row['id']) . '"></div>';
+            $html .= '</td>';
+            $html .= '</tr>';
+        }
+
+        return $html;
     }
 
     /**
      * Settings page
      */
     public function settings_page() {
+        $compression_map = array(
+            'php_native' => 'PHP Native (GD/Imagick)',
+            'tinypng'    => 'TinyPNG API',
+            'imageoptim' => 'ImageOptim API'
+        );
+        $compression_label = isset($compression_map[$this->compression_service]) ? $compression_map[$this->compression_service] : strtoupper($this->compression_service);
+
+        $has_optimize = ($this->optimize_media || $this->compress_images || $this->auto_resize_images);
+        $has_offload = ($this->offload_media && $this->is_configured());
+        $plugin_status = 'Not configured';
+        if ($has_optimize && $has_offload) {
+            $plugin_status = 'Optimize + Offload';
+        } elseif ($has_optimize) {
+            $plugin_status = 'Optimize';
+        } elseif ($has_offload) {
+            $plugin_status = 'Offload';
+        }
+
+        $aws_ready = $this->is_configured();
+        $aws_status = $aws_ready ? 'Enabled' : 'Disabled';
+        $aws_detail = $aws_ready ? (!empty($this->bucket_name) && !empty($this->sqs_queue_url) ? 'Bucket + Queue connected' : 'Credentials saved') : 'Add AWS credentials to unlock';
+
+        $compression_status = $this->compress_images ? sprintf(__('Enabled via %s', 'enhanced-s3'), $compression_label) : __('Disabled', 'enhanced-s3');
+        $resize_status = $this->auto_resize_images
+            ? sprintf(__('Enabled (%1$spx × %2$spx max)', 'enhanced-s3'), $this->resize_max_width ?: '∞', $this->resize_max_height ?: '∞')
+            : __('Disabled', 'enhanced-s3');
+
         ?>
         <div class="wrap">
             <h1>FeatherLift Media Settings</h1>
+
+            <div class="enhanced-s3-instructions">
+                <div>
+                    <h2><?php esc_html_e('Quick Setup Instructions', 'enhanced-s3'); ?></h2>
+                    <ol>
+                        <li><?php esc_html_e('Enter AWS credentials under External Storage & CDN and save the settings.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('Use Media Workflow Intent to decide whether you want optimization, offloading, or both.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('Run Optimize & Resize rules before queuing uploads.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('Once AWS is ready, manage automation and queue uploads from the FeatherLite box.', 'enhanced-s3'); ?></li>
+                    </ol>
+                </div>
+                <div class="enhanced-s3-instructions-policy">
+                    <h3><?php esc_html_e('Required AWS IAM Permissions', 'enhanced-s3'); ?></h3>
+                    <p>
+                        <a href="#" class="toggle-iam-policy" data-target="#iam-permissions"><?php esc_html_e('Show/Hide IAM Policy', 'enhanced-s3'); ?></a>
+                    </p>
+                    <div id="iam-permissions" style="display:none;">
+                        <pre>{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:CreateBucket", "s3:PutBucketPolicy", "s3:PutObject",
+                "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"
+            ],
+            "Resource": ["arn:aws:s3:::ama-public-na", "arn:aws:s3:::ama-public-na/*"]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "sqs:CreateQueue", "sqs:SendMessage", "sqs:ReceiveMessage",
+                "sqs:DeleteMessage", "sqs:GetQueueAttributes"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": ["cloudfront:CreateDistribution", "cloudfront:GetDistribution"],
+            "Resource": "*"
+        }
+    ]
+}</pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="current-config">
+                <h3><?php esc_html_e('Current Configuration', 'enhanced-s3'); ?></h3>
+                <ul class="current-config-list">
+                    <li><strong><?php esc_html_e('Plugin Status:', 'enhanced-s3'); ?></strong> <?php echo esc_html($plugin_status); ?></li>
+                    <li><strong><?php esc_html_e('AWS Resources:', 'enhanced-s3'); ?></strong> <?php echo esc_html($aws_status); ?> <span class="current-config-hint"><?php echo esc_html($aws_detail); ?></span></li>
+                    <li><strong><?php esc_html_e('S3 Bucket:', 'enhanced-s3'); ?></strong> <?php echo $aws_ready && $this->bucket_name ? esc_html($this->bucket_name) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
+                    <li><strong><?php esc_html_e('SQS Queue:', 'enhanced-s3'); ?></strong> <?php echo $aws_ready && $this->sqs_queue_url ? esc_html(basename($this->sqs_queue_url)) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
+                    <li><strong><?php esc_html_e('CloudFront Domain:', 'enhanced-s3'); ?></strong> <?php echo ($this->use_cloudfront && $this->cloudfront_domain) ? esc_html($this->cloudfront_domain) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
+                    <li><strong><?php esc_html_e('Compression Service:', 'enhanced-s3'); ?></strong> <?php echo esc_html($compression_status); ?></li>
+                    <li><strong><?php esc_html_e('Auto Resize:', 'enhanced-s3'); ?></strong> <?php echo esc_html($resize_status); ?></li>
+                </ul>
+            </div>
+
             <?php $this->render_media_scan_box('settings'); ?>
             
             <form method="post" action="options.php" id="enhanced-s3-settings-form">
@@ -1423,7 +1604,20 @@ class Enhanced_S3_Media_Upload {
                 if (!$this->intent_committed) {
                     echo '<div class="notice notice-info intent-onboarding"><p>Select at least one option under "What should this plugin do?" and save. Optimization and offload settings will unlock after you confirm your intent.</p></div>';
                 }
-                foreach ($sections as $section_id => $section) {
+                $ordered_sections = array(
+                    'enhanced_s3_intent_section',
+                    'enhanced_s3_optimize_section',
+                    'enhanced_s3_automation_section',
+                    'enhanced_s3_offload_section'
+                );
+                if ($this->ai_features_available) {
+                    $ordered_sections[] = 'enhanced_s3_ai_section';
+                }
+                $render_queue = array_unique(array_merge($ordered_sections, array_keys($sections)));
+                foreach ($render_queue as $section_id) {
+                    if (!isset($sections[$section_id])) {
+                        continue;
+                    }
                     if ($section_id === 'enhanced_s3_ai_section') {
                         continue;
                     }
@@ -1448,159 +1642,80 @@ class Enhanced_S3_Media_Upload {
                     }
                     echo '</div>';
                 }
+
+                if ($this->ai_features_available && isset($sections['enhanced_s3_ai_section'])) {
+                    $section = $sections['enhanced_s3_ai_section'];
+                    echo '<div class="enhanced-s3-card">';
+                    if (!empty($section['title'])) {
+                        echo '<h2>' . esc_html($section['title']) . '</h2>';
+                    }
+                    if (!empty($section['callback'])) {
+                        call_user_func($section['callback'], $section);
+                    }
+                    if (isset($wp_settings_fields['enhanced-s3-settings']['enhanced_s3_ai_section'])) {
+                        echo '<table class="form-table">';
+                        do_settings_fields('enhanced-s3-settings', 'enhanced_s3_ai_section');
+                        echo '</table>';
+                    }
+                    echo '</div>';
+                }
                 echo '</div>';
                 ?>
                 
                 <?php submit_button(); ?>
             </form>
             
-            <!-- AWS Setup Section - Always Show -->
+            <?php if ($aws_ready): ?>
             <div class="aws-setup-section">
-                <h3>AWS Resource Management</h3>
-                
-                <?php if ($this->is_configured()): ?>
-                    <?php 
-                    $is_setup = !empty($this->bucket_name) && !empty($this->sqs_queue_url);
-                    ?>
-                    
-                    <?php if ($is_setup): ?>
-                        <p style="color: #46b450;"><strong>✓ AWS resources are configured and ready.</strong></p>
-                        <p>Bucket: <code><?php echo esc_html($this->bucket_name); ?></code><br>
-                        Queue: <code><?php echo esc_html(basename($this->sqs_queue_url)); ?></code>
-                        <?php if (!empty($this->cloudfront_domain)): ?>
-                            <br>CloudFront: <code><?php echo esc_html($this->cloudfront_domain); ?></code>
+                <h3><?php esc_html_e('AWS Resource Management', 'enhanced-s3'); ?></h3>
+                <?php $is_setup = !empty($this->bucket_name) && !empty($this->sqs_queue_url); ?>
+                <?php if ($is_setup): ?>
+                    <p class="aws-setup-status aws-setup-status--ready">&#10003; <?php esc_html_e('AWS resources are configured and ready.', 'enhanced-s3'); ?></p>
+                    <p>
+                        <?php esc_html_e('Bucket:', 'enhanced-s3'); ?> <code><?php echo esc_html($this->bucket_name); ?></code><br>
+                        <?php esc_html_e('Queue:', 'enhanced-s3'); ?> <code><?php echo esc_html(basename($this->sqs_queue_url)); ?></code><br>
+                        <?php if (!empty($this->cloudfront_domain)) : ?>
+                            <?php esc_html_e('CloudFront:', 'enhanced-s3'); ?> <code><?php echo esc_html($this->cloudfront_domain); ?></code>
                         <?php endif; ?>
-                        </p>
-                        
-                        <div class="reset-options" style="background: #fff2cc; padding: 15px; border-left: 4px solid #ffb900; margin: 15px 0;">
-                            <h4>File Recovery Options</h4>
-                            <p>If you want to stop using AWS S3, you can download all your files back to local storage.</p>
-                            
-                            <button type="button" id="download-all-files" class="button button-primary">
-                                Download All S3 Files to Local Storage
-                            </button>
-                            
-                            <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
-                                <h4>Reset Configuration</h4>
-                                <p>Reset plugin configuration (files remain on S3 - use download option above first if needed).</p>
-                                
-                                <button type="button" id="simple-reset" class="button button-secondary">
-                                    Reset Plugin Configuration Only
-                                </button>
-                            </div>
+                    </p>
+                    <div class="reset-options">
+                        <h4><?php esc_html_e('File Recovery Options', 'enhanced-s3'); ?></h4>
+                        <p><?php esc_html_e('Download everything back to local storage before disabling AWS.', 'enhanced-s3'); ?></p>
+                        <button type="button" id="download-all-files" class="button button-primary"><?php esc_html_e('Download All S3 Files to Local Storage', 'enhanced-s3'); ?></button>
+                        <div class="reset-divider">
+                            <h4><?php esc_html_e('Reset Configuration', 'enhanced-s3'); ?></h4>
+                            <p><?php esc_html_e('Reset plugin configuration while keeping files on S3.', 'enhanced-s3'); ?></p>
+                            <button type="button" id="simple-reset" class="button button-secondary"><?php esc_html_e('Reset Plugin Configuration Only', 'enhanced-s3'); ?></button>
                         </div>
-                        
-                    <?php else: ?>
-                        <p>Your AWS credentials are configured. You can now set up AWS resources automatically.</p>
-                        <button type="button" id="setup-aws-resources" class="button button-primary">
-                            Setup AWS Resources
-                        </button>
-                    <?php endif; ?>
-                    
-                    <!-- Test Connection Buttons - Always Show -->
-                    <div style="margin-top: 15px;">
-                        <h4>Test Connections</h4>
-                        <button type="button" id="test-s3-connection" class="button button-secondary">Test S3 Connection</button>
-                        
-                        <?php if ($this->use_cloudfront && !empty($this->cloudfront_domain)): ?>
-                        <button type="button" id="test-cloudfront-connection" class="button button-secondary">Test CloudFront Connection</button>
-                        <?php endif; ?>
-                        
-                        <?php if (!empty($this->sqs_queue_url)): ?>
-                        <button type="button" id="test-sqs-connection" class="button button-secondary">Test SQS Connection</button>
-                        <?php endif; ?>
                     </div>
-                    
                 <?php else: ?>
-                    <p style="color: #d63638;"><strong>Please enter your AWS credentials above and save settings first.</strong></p>
-                    <p>After saving credentials, the setup and test buttons will appear here.</p>
+                    <p><?php esc_html_e('Your AWS credentials are saved. Finish setup to create the bucket, queue, and optional CDN.', 'enhanced-s3'); ?></p>
+                    <button type="button" id="setup-aws-resources" class="button button-primary"><?php esc_html_e('Setup AWS Resources', 'enhanced-s3'); ?></button>
                 <?php endif; ?>
-                
-                <div id="setup-status" style="margin-top: 10px;"></div>
-                <div id="connection-result" style="margin-top: 10px;"></div>
-            </div>
-            
-            <div class="current-config">
-                <h3>Current Configuration</h3>
-                <table class="form-table">
-                    <tr>
-                        <th>Plugin Status:</th>
-                        <td><?php echo $this->is_configured() ? '<span style="color: green;">✓ Configured</span>' : '<span style="color: red;">✗ Not configured</span>'; ?></td>
-                    </tr>
-                    <tr>
-                        <th>AWS Region:</th>
-                        <td><?php echo esc_html($this->region ?: 'Not set'); ?></td>
-                    </tr>
-                    <tr>
-                        <th>S3 Bucket:</th>
-                        <td><?php echo esc_html($this->bucket_name ?: 'Not configured'); ?></td>
-                    </tr>
-                    <tr>
-                        <th>SQS Queue URL:</th>
-                        <td><?php echo esc_html($this->sqs_queue_url ?: 'Not configured'); ?></td>
-                    </tr>
-                    <tr>
-                        <th>CloudFront Domain:</th>
-                        <td><?php echo esc_html($this->cloudfront_domain ?: 'Not configured'); ?></td>
-                    </tr>
-                    <tr>
-                        <th>Upload Thumbnails:</th>
-                        <td><?php echo $this->upload_thumbnails ? 'Yes' : 'No'; ?></td>
-                    </tr>
-                    <tr>
-                        <th>Auto-delete Local:</th>
-                        <td><?php echo $this->auto_delete_local ? 'Yes' : 'No'; ?></td>
-                    </tr>
-                </table>
-            </div>
-            
-            <!-- Instructions -->
-            <div class="instructions-section" style="background: #f0f8ff; padding: 15px; border-left: 4px solid #0073aa; margin-top: 20px;">
-                <h3>Quick Setup Instructions</h3>
-                <ol>
-                    <li><strong>Enter AWS Credentials:</strong> Add your AWS Access Key, Secret Key, and select Region above</li>
-                    <li><strong>Save Settings:</strong> Click "Save Changes" button</li>
-                    <li><strong>Setup Resources:</strong> Click "Setup AWS Resources" to auto-create bucket, queue, and CloudFront</li>
-                    <li><strong>Test Connections:</strong> Use the test buttons to verify everything works</li>
-                    <li><strong>Start Uploading:</strong> Go to Media Library and upload images to S3!</li>
-                </ol>
-                
-                <h4>Required AWS IAM Permissions:</h4>
-                <p>Your AWS user needs permissions for S3, SQS, and CloudFront. <a href="#" onclick="jQuery('#iam-permissions').toggle()">Show/Hide IAM Policy</a></p>
-                
-                <div id="iam-permissions" style="display: none; background: #fff; padding: 10px; margin-top: 10px; border: 1px solid #ddd;">
-                    <pre style="font-size: 11px; overflow-x: auto;">{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3:CreateBucket", "s3:PutBucketPolicy", "s3:PutObject", 
-                "s3:GetObject", "s3:DeleteObject", "s3:ListBucket"
-            ],
-            "Resource": ["arn:aws:s3:::ama-public-na", "arn:aws:s3:::ama-public-na/*"]
-        },
-        {
-            "Effect": "Allow",
-            "Action": [
-                "sqs:CreateQueue", "sqs:SendMessage", "sqs:ReceiveMessage", 
-                "sqs:DeleteMessage", "sqs:GetQueueAttributes"
-            ],
-            "Resource": "*"
-        },
-        {
-            "Effect": "Allow",
-            "Action": ["cloudfront:CreateDistribution", "cloudfront:GetDistribution"],
-            "Resource": "*"
-        }
-    ]
-}</pre>
+                <div class="aws-test-block">
+                    <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
+                    <button type="button" id="test-s3-connection" class="button button-secondary"><?php esc_html_e('Test S3 Connection', 'enhanced-s3'); ?></button>
+                    <?php if ($this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
+                        <button type="button" id="test-cloudfront-connection" class="button button-secondary"><?php esc_html_e('Test CloudFront Connection', 'enhanced-s3'); ?></button>
+                    <?php endif; ?>
+                    <?php if (!empty($this->sqs_queue_url)) : ?>
+                        <button type="button" id="test-sqs-connection" class="button button-secondary"><?php esc_html_e('Test SQS Connection', 'enhanced-s3'); ?></button>
+                    <?php endif; ?>
                 </div>
+                <div id="setup-status"></div>
+                <div id="connection-result"></div>
             </div>
+            <?php endif; ?>
         </div>
         
         <script type="text/javascript">
         jQuery(document).ready(function($) {
+            $('.toggle-iam-policy').on('click', function(e) {
+                e.preventDefault();
+                var target = $(this).data('target');
+                $(target).toggle();
+            });
+
             // Test S3 Connection
             $('#test-s3-connection').on('click', function(e) {
                 e.preventDefault();

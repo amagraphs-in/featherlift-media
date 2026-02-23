@@ -69,21 +69,32 @@
                 var $bulkOptimizeBtn = $box.find('.featherlite-optimize-selected');
                 var $bulkUploadBtn = $box.find('.featherlite-upload-selected');
                 var $statusArea = $box.find('.featherlite-bulk-status');
+                var $tableWrapper = $box.find('.featherlite-scan-table-wrapper');
+                var $tableBody = $box.find('.featherlite-scan-table tbody');
+                var $pagination = $box.find('.featherlite-pagination');
+                var $prevBtn = $box.find('.featherlite-page-prev');
+                var $nextBtn = $box.find('.featherlite-page-next');
+                var perPage = parseInt($box.data('per-page'), 10) || 20;
+                var totalPages = parseInt($box.data('total-pages'), 10) || 1;
+                var currentPage = parseInt($box.data('page'), 10) || 1;
+                var isLoading = false;
+                var context = $box.data('context') || '';
 
                 var syncState = function() {
                     var $eligible = $box.find('.featherlite-row-select:enabled');
                     var $checked = $eligible.filter(':checked');
-                    var hasSelection = $checked.length > 0;
                     if ($bulkOptimizeBtn.length) {
                         var canOptimize = $checked.filter(function() {
-                            return $(this).data('can-optimize') === 1 || $(this).data('can-optimize') === '1';
+                            var val = $(this).data('can-optimize');
+                            return val === 1 || val === '1';
                         }).length > 0;
                         $bulkOptimizeBtn.prop('disabled', !canOptimize);
                         $bulkOptimizeBtn.toggleClass('is-hidden', !canOptimize);
                     }
                     if ($bulkUploadBtn.length) {
                         var canUpload = $checked.filter(function() {
-                            return $(this).data('can-upload') === 1 || $(this).data('can-upload') === '1';
+                            var val = $(this).data('can-upload');
+                            return val === 1 || val === '1';
                         }).length > 0;
                         $bulkUploadBtn.prop('disabled', !canUpload);
                         $bulkUploadBtn.toggleClass('is-hidden', !canUpload);
@@ -93,6 +104,74 @@
                     } else {
                         $selectAll.prop('checked', false);
                     }
+                };
+
+                var updatePaginationControls = function(meta) {
+                    if (meta && typeof meta === 'object') {
+                        currentPage = meta.page || currentPage;
+                        totalPages = meta.total_pages || totalPages;
+                        perPage = meta.per_page || perPage;
+                    }
+                    if ($pagination.length) {
+                        $pagination.toggle(totalPages > 1);
+                        $pagination.find('.featherlite-page-status').text('Page ' + currentPage + ' of ' + totalPages);
+                    }
+                    if ($prevBtn.length) {
+                        $prevBtn.prop('disabled', currentPage <= 1);
+                    }
+                    if ($nextBtn.length) {
+                        $nextBtn.prop('disabled', currentPage >= totalPages);
+                    }
+                };
+
+                var setLoadingState = function(state) {
+                    isLoading = state;
+                    $box.toggleClass('featherlite-loading', state);
+                    if ($tableWrapper.length) {
+                        $tableWrapper.toggleClass('is-loading', state);
+                    }
+                    updatePaginationControls();
+                };
+
+                var fetchFeatherlitePage = function(targetPage) {
+                    targetPage = parseInt(targetPage, 10);
+                    if (!targetPage || targetPage === currentPage || targetPage < 1 || targetPage > totalPages || isLoading) {
+                        return;
+                    }
+
+                    setLoadingState(true);
+
+                    $.ajax({
+                        url: enhancedS3Ajax.ajaxurl,
+                        type: 'POST',
+                        data: {
+                            action: 'get_media_scan_rows',
+                            page: targetPage,
+                            per_page: perPage,
+                            context: context,
+                            nonce: enhancedS3Ajax.nonce
+                        }
+                    }).done(function(response) {
+                        if (response && response.success && response.data) {
+                            var payload = response.data || {};
+                            var html = payload.rows_html || '';
+                            var meta = payload.meta || {};
+                            if ($tableBody.length) {
+                                $tableBody.html(html);
+                            }
+                            updatePaginationControls(meta);
+                            syncState();
+                        } else if (response && response.data) {
+                            var errMsg = typeof response.data === 'string' ? response.data : 'Unable to load that page right now.';
+                            alert(errMsg);
+                        } else {
+                            alert('Unable to load that page right now.');
+                        }
+                    }).fail(function() {
+                        alert('Unable to load that page right now.');
+                    }).always(function() {
+                        setLoadingState(false);
+                    });
                 };
 
                 $box.on('change', '.featherlite-row-select', function() {
@@ -118,7 +197,8 @@
                     $bulkOptimizeBtn.on('click', function(e) {
                         e.preventDefault();
                         var ids = $box.find('.featherlite-row-select:enabled:checked').filter(function() {
-                            return $(this).data('can-optimize') === 1 || $(this).data('can-optimize') === '1';
+                            var val = $(this).data('can-optimize');
+                            return val === 1 || val === '1';
                         }).map(function() {
                             return $(this).val();
                         }).get();
@@ -135,7 +215,8 @@
                     $bulkUploadBtn.on('click', function(e) {
                         e.preventDefault();
                         var ids = $box.find('.featherlite-row-select:enabled:checked').filter(function() {
-                            return $(this).data('can-upload') === 1 || $(this).data('can-upload') === '1';
+                            var val = $(this).data('can-upload');
+                            return val === 1 || val === '1';
                         }).map(function() {
                             return $(this).val();
                         }).get();
@@ -148,6 +229,25 @@
                     });
                 }
 
+                if ($prevBtn.length) {
+                    $prevBtn.on('click', function(e) {
+                        e.preventDefault();
+                        if (!$(this).prop('disabled')) {
+                            fetchFeatherlitePage(currentPage - 1);
+                        }
+                    });
+                }
+
+                if ($nextBtn.length) {
+                    $nextBtn.on('click', function(e) {
+                        e.preventDefault();
+                        if (!$(this).prop('disabled')) {
+                            fetchFeatherlitePage(currentPage + 1);
+                        }
+                    });
+                }
+
+                updatePaginationControls();
                 syncState();
             });
         },

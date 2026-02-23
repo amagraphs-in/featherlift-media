@@ -11,6 +11,32 @@
     margin: 20px 0;
 }
 
+.aws-setup-status {
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.aws-setup-status--ready {
+    color: #1f7a3b;
+}
+
+.aws-test-block {
+    margin-top: 15px;
+}
+
+.reset-options {
+    background: #fff2cc;
+    padding: 15px;
+    border-left: 4px solid #ffb900;
+    margin: 15px 0;
+}
+
+.reset-divider {
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid #ddd;
+}
+
 .enhanced-s3-settings-grid {
     display: block;
     margin-top: 20px;
@@ -60,6 +86,58 @@
     color: #23282d;
 }
 
+.current-config-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.current-config-list li {
+    margin-bottom: 8px;
+}
+
+.current-config-hint {
+    display: inline-block;
+    margin-left: 6px;
+    color: #6c7781;
+    font-size: 12px;
+}
+
+.enhanced-s3-instructions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    padding: 20px;
+    border: 1px solid #0073aa;
+    border-left-width: 4px;
+    background: #f0f8ff;
+    border-radius: 6px;
+    margin-top: 20px;
+}
+
+.enhanced-s3-instructions h2 {
+    margin-top: 0;
+}
+
+.enhanced-s3-instructions ol {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.enhanced-s3-instructions-policy {
+    flex: 1;
+    min-width: 260px;
+}
+
+.enhanced-s3-instructions-policy pre {
+    max-height: 220px;
+    overflow: auto;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    padding: 12px;
+    font-size: 11px;
+}
+
 /* FeatherLite Media Scan */
 .featherlite-scan {
     background: linear-gradient(135deg, #ffffff 0%, #f7fbff 100%);
@@ -68,6 +146,11 @@
     padding: 20px;
     margin: 24px 0;
     box-shadow: 0 12px 30px rgba(12, 44, 89, 0.08);
+}
+
+.featherlite-scan.featherlite-loading {
+    opacity: 0.6;
+    pointer-events: none;
 }
 
 .featherlite-scan-heading h2 {
@@ -121,6 +204,22 @@
 
 .featherlite-scan-table .column-actions {
     width: 200px;
+}
+
+.featherlite-scan-table-wrapper.is-loading {
+    position: relative;
+}
+
+.featherlite-scan-table-wrapper.is-loading::after {
+    content: 'Loading...';
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    color: #1d2327;
 }
 
 .featherlite-thumb {
@@ -190,6 +289,18 @@
 
 .featherlite-bulk-status {
     margin-top: 16px;
+}
+
+.featherlite-pagination {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.featherlite-page-status {
+    font-weight: 600;
+    color: #1d2327;
 }
 
 .featherlite-hint {
