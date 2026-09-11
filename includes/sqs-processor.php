@@ -48,6 +48,14 @@ class Enhanced_S3_Queue_Manager {
         
         // Insert log entry
         $logs_table = $wpdb->prefix . 'amagraphs_s3_logs';
+        $existing_log_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$logs_table} WHERE attachment_id = %d AND operation_type = 'upload' AND status IN ('requested', 'in_progress') ORDER BY id DESC LIMIT 1",
+            $attachment_id
+        ));
+        if ($existing_log_id) {
+            return (int) $existing_log_id;
+        }
+
         $wpdb->insert(
             $logs_table,
             array(
@@ -91,6 +99,54 @@ class Enhanced_S3_Queue_Manager {
         }
         
         return $log_id;
+    }
+
+    public function queue_static_asset($file_path, $s3_key, $content_type) {
+        global $wpdb;
+
+        if (!file_exists($file_path)) {
+            throw new Exception('File does not exist: ' . $file_path);
+        }
+
+        $logs_table = $wpdb->prefix . 'amagraphs_s3_logs';
+        $existing_log_id = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$logs_table} WHERE operation_type = 'asset' AND s3_key = %s AND status IN ('requested', 'in_progress') ORDER BY id DESC LIMIT 1",
+            $s3_key
+        ));
+        if ($existing_log_id) {
+            return false;
+        }
+
+        $wpdb->insert($logs_table, array(
+            'attachment_id' => 0,
+            'operation_type' => 'asset',
+            'status' => 'requested',
+            'file_name' => basename($file_path),
+            'file_size' => filesize($file_path),
+            's3_key' => $s3_key,
+            'job_meta' => maybe_serialize(array('source' => 'static-assets-panel')),
+            'created_at' => current_time('mysql')
+        ));
+        $log_id = $wpdb->insert_id;
+
+        $result = $this->aws_sdk->send_sqs_message($this->options['sqs_queue_url'], array(
+            'operation' => 'asset',
+            'log_id' => $log_id,
+            'file_path' => $file_path,
+            's3_key' => $s3_key,
+            'content_type' => $content_type,
+            'timestamp' => time()
+        ));
+        if (empty($result['success'])) {
+            $wpdb->update($logs_table, array(
+                'status' => 'failed',
+                'error_message' => 'Failed to queue: ' . $result['error'],
+                'updated_at' => current_time('mysql')
+            ), array('id' => $log_id));
+            throw new Exception('Failed to queue static asset: ' . $result['error']);
+        }
+
+        return true;
     }
     
     /**
@@ -505,17 +561,6 @@ class Enhanced_S3_Queue_Manager {
                 update_post_meta($attachment_id, 'enhanced_s3_compression_service', $compression_results['service_used']);
             }
             
-            // Replace URLs in content to point to S3/CloudFront
-            $this->replace_urls_in_content($attachment_id, $s3_key);
-            
-            // Update attachment GUID to S3 URL
-            $this->update_attachment_guid($attachment_id, $s3_key);
-            
-            // Delete local files if enabled
-            if (isset($this->options['auto_delete_local']) && $this->options['auto_delete_local']) {
-                $this->delete_local_files($attachment_id, $file_path);
-            }
-            
             // Prepare completion data
             $completion_data = array(
                 's3_key' => $s3_key,
@@ -683,25 +728,11 @@ class Enhanced_S3_Queue_Manager {
             // Update attachment file path
             update_attached_file($attachment_id, $local_path);
             
-            // Remove S3 metadata
-            delete_post_meta($attachment_id, 'enhanced_s3_key');
-            delete_post_meta($attachment_id, 'enhanced_s3_bucket');
-            delete_post_meta($attachment_id, 'enhanced_s3_url');
-            
             // Regenerate thumbnails for images (in case some thumbnails were missing)
             if (wp_attachment_is_image($attachment_id)) {
                 $metadata = wp_generate_attachment_metadata($attachment_id, $local_path);
                 wp_update_attachment_metadata($attachment_id, $metadata);
             }
-            
-            // Update attachment GUID back to local URL
-            $local_url = wp_get_attachment_url($attachment_id);
-            global $wpdb;
-            $wpdb->update(
-                $wpdb->posts,
-                array('guid' => $local_url),
-                array('ID' => $attachment_id)
-            );
             
             // Update log as completed
             $this->update_log_status($log_id, 'completed', null, array(
@@ -718,6 +749,39 @@ class Enhanced_S3_Queue_Manager {
                 $this->send_restore_completion_notification();
             }
             
+        } catch (Exception $e) {
+            $this->update_log_status($log_id, 'failed', $e->getMessage());
+        }
+    }
+
+    private function handle_static_asset($message_body, $log_id) {
+        try {
+            $file_path = $message_body['file_path'] ?? '';
+            $s3_key = $message_body['s3_key'] ?? '';
+            if (empty($file_path) || empty($s3_key) || !file_exists($file_path)) {
+                throw new Exception('Static asset is missing or unavailable.');
+            }
+
+            $result = $this->aws_sdk->upload_file_to_s3(
+                $file_path,
+                $this->options['bucket_name'],
+                $s3_key,
+                $message_body['content_type'] ?? 'application/octet-stream'
+            );
+            if (empty($result['success'])) {
+                throw new Exception($result['error'] ?? 'Static asset upload failed.');
+            }
+
+            $this->update_log_status($log_id, 'completed', null, array(
+                's3_key' => $s3_key,
+                'file_size' => filesize($file_path)
+            ));
+            $manifest = get_option('enhanced_s3_static_asset_manifest', array());
+            if (!is_array($manifest)) {
+                $manifest = array();
+            }
+            $manifest[$s3_key] = md5_file($file_path);
+            update_option('enhanced_s3_static_asset_manifest', $manifest, false);
         } catch (Exception $e) {
             $this->update_log_status($log_id, 'failed', $e->getMessage());
         }
@@ -801,6 +865,9 @@ class Enhanced_S3_Queue_Manager {
                 case 'download':
                     $this->handle_download($message_body, $log_id);
                     break;
+                case 'asset':
+                    $this->handle_static_asset($message_body, $log_id);
+                    break;
                     
                 default:
                     throw new Exception('Unknown operation: ' . $operation);
@@ -855,11 +922,6 @@ class Enhanced_S3_Queue_Manager {
                 $thumb_s3_key,
                 $thumb_mime
             );
-            
-            // Delete local thumbnail if auto-delete is enabled
-            if (isset($this->options['auto_delete_local']) && $this->options['auto_delete_local']) {
-                unlink($thumb_path);
-            }
         }
     }
 
@@ -1020,32 +1082,6 @@ class Enhanced_S3_Queue_Manager {
         $this->perform_url_replacement($old_url, $new_url);
     }
     
-    /**
-     * Delete local files
-     */
-    private function delete_local_files($attachment_id, $main_file_path) {
-        // Delete main file
-        if (file_exists($main_file_path)) {
-            unlink($main_file_path);
-        }
-        
-        // Delete thumbnails
-        $metadata = wp_get_attachment_metadata($attachment_id);
-        
-        if (!empty($metadata['sizes'])) {
-            $file_dir = dirname($main_file_path);
-            
-            foreach ($metadata['sizes'] as $size_info) {
-                if (isset($size_info['file'])) {
-                    $thumb_path = $file_dir . '/' . $size_info['file'];
-                    if (file_exists($thumb_path)) {
-                        unlink($thumb_path);
-                    }
-                }
-            }
-        }
-    }
-
     /**
      * Regenerate thumbnails
      */

@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.3
+ * Version: 1.1.4
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.3';
+    private $version = '1.1.4';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -43,6 +43,8 @@ class Enhanced_S3_Media_Upload {
     private $s3_endpoint;
     private $s3_prefix;
     private $use_cloudfront;
+    private $serve_media_from_cdn;
+    private $serve_static_assets_from_cdn;
     private $cloudfront_domain;
     private $cloudfront_distribution_id;
     private $sqs_queue_url;
@@ -137,6 +139,8 @@ class Enhanced_S3_Media_Upload {
         $this->bucket_name = $this->get_option('bucket_name', '');
         $this->s3_prefix = $this->get_option('s3_prefix', 'wp-content/uploads/');
         $this->use_cloudfront = $this->get_option('use_cloudfront', false);
+        $this->serve_media_from_cdn = (bool) $this->get_option('serve_media_from_cdn', $this->use_cloudfront);
+        $this->serve_static_assets_from_cdn = (bool) $this->get_option('serve_static_assets_from_cdn', false);
         $this->cloudfront_domain = $this->get_option('cloudfront_domain', '');
         $this->cloudfront_distribution_id = $this->get_option('cloudfront_distribution_id', '');
         $this->sqs_queue_url = $this->get_option('sqs_queue_url', '');
@@ -155,7 +159,7 @@ class Enhanced_S3_Media_Upload {
         $this->resize_max_width = intval($this->get_option('resize_max_width', $this->default_resize_cap));
         $this->resize_max_height = intval($this->get_option('resize_max_height', $this->default_resize_cap));
         $stored_ai_enabled = (bool) $this->get_option('ai_alt_enabled', false);
-        $this->ai_features_available = (bool) apply_filters('enhanced_s3_ai_ui_enabled', false);
+        $this->ai_features_available = (bool) apply_filters('enhanced_s3_ai_ui_enabled', true);
         $this->ai_alt_enabled = $this->ai_features_available ? $stored_ai_enabled : false;
         $this->ai_agent = $this->get_option('ai_agent', 'openai');
         $this->ai_model = $this->get_option('ai_model', 'gpt-4o-mini');
@@ -212,6 +216,7 @@ class Enhanced_S3_Media_Upload {
         add_action('wp_ajax_bulk_s3_upload', array($this, 'ajax_bulk_s3_upload'));
         add_action('wp_ajax_bulk_s3_download', array($this, 'ajax_bulk_s3_download'));
         add_action('wp_ajax_manual_upload_all', array($this, 'ajax_manual_upload_all'));
+        add_action('wp_ajax_queue_static_assets', array($this, 'ajax_queue_static_assets'));
         add_action('wp_ajax_retry_failed_operations', array($this, 'ajax_retry_failed_operations'));
         add_action('wp_ajax_generate_ai_alt_tag', array($this, 'ajax_generate_ai_alt_tag'));
         add_action('wp_ajax_bulk_generate_ai_alt_tags', array($this, 'ajax_bulk_generate_ai_alt_tags'));
@@ -245,6 +250,8 @@ class Enhanced_S3_Media_Upload {
         // URL replacement hooks
         add_filter('wp_get_attachment_url', array($this, 'get_attachment_url'), 10, 2);
         add_filter('wp_calculate_image_srcset', array($this, 'update_image_srcset'), 10, 5);
+        add_filter('script_loader_src', array($this, 'get_static_asset_url'), 10, 2);
+        add_filter('style_loader_src', array($this, 'get_static_asset_url'), 10, 2);
     }
 
     public function auto_upload_admin_notice() {
@@ -692,6 +699,8 @@ class Enhanced_S3_Media_Upload {
             's3_prefix'                 => 'Upload prefix',
             'preserve_bucket_permissions' => 'Bucket permission strategy',
             'use_cloudfront'            => 'Enable CloudFront CDN',
+            'serve_media_from_cdn'      => 'Serve media from CDN',
+            'serve_static_assets_from_cdn' => 'Serve scripts and styles from CDN',
             'cloudfront_domain'         => 'CloudFront domain (manual)',
             'cloudfront_distribution_id'=> 'CloudFront distribution ID',
             'upload_thumbnails'         => 'Upload generated thumbnail sizes',
@@ -1594,6 +1603,7 @@ class Enhanced_S3_Media_Upload {
             </div>
 
             <?php $this->render_media_scan_box('settings'); ?>
+            <?php $this->render_static_assets_panel(); ?>
             
             <form method="post" action="options.php" id="enhanced-s3-settings-form">
                 <?php
@@ -1949,12 +1959,20 @@ class Enhanced_S3_Media_Upload {
                 </div>
                 
                 <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                    <button type="button" id="upload-current-page" class="button button-primary">
+                        Upload This Page to S3
+                    </button>
                     <button type="button" id="bulk-upload" class="button button-primary" disabled>
                         Upload Selected to S3 (<span id="upload-count">0</span> files, <span id="upload-size">0 Bytes</span>)
                     </button>
                     <button type="button" id="bulk-download" class="button button-secondary" disabled>
                         Download Selected from S3 (<span id="download-count">0</span> files, <span id="download-size">0 Bytes</span>)
                     </button>
+                    <?php if ($this->ai_alt_enabled && $this->optimize_media && $this->offload_media && $this->is_configured()): ?>
+                    <button type="button" id="bulk-process-media" class="button button-primary" disabled>
+                        Optimize, Upload &amp; Write Alt Text
+                    </button>
+                    <?php endif; ?>
                     <?php if ($this->ai_alt_enabled): ?>
                     <button type="button" id="bulk-generate-alt" class="button" disabled>
                         Generate Alt Tags (AI)
@@ -2076,7 +2094,7 @@ class Enhanced_S3_Media_Upload {
                     var localExists = $this.data('local-exists') == '1';
                     var fileSize = parseInt($this.data('file-size') || 0);
                     
-                    if (localExists && !isS3) {
+                    if (localExists) {
                         uploadCount++;
                         uploadSize += fileSize;
                     }
@@ -2114,7 +2132,7 @@ class Enhanced_S3_Media_Upload {
             });
             
             $('#select-all-local').on('click', function() {
-                $('input[name="attachment_ids[]"][data-local-exists="1"][data-is-s3="0"]').prop('checked', true);
+                $('input[name="attachment_ids[]"][data-local-exists="1"]').prop('checked', true);
                 updateButtonStates();
             });
             
@@ -2146,6 +2164,72 @@ class Enhanced_S3_Media_Upload {
         }
         
         return 0;
+    }
+
+    private function render_static_assets_panel() {
+        if (!$this->offload_media) {
+            return;
+        }
+        ?>
+        <section class="enhanced-s3-card enhanced-s3-static-assets">
+            <h2>Static Assets</h2>
+            <p>Queue JavaScript and CSS from WordPress core, plugins, and themes. Source files remain on the server and CDN delivery stays reversible.</p>
+            <p><button type="button" id="queue-static-assets" class="button button-secondary" <?php disabled(!$this->is_configured()); ?>>Queue All JavaScript &amp; CSS</button></p>
+            <div id="static-assets-status" aria-live="polite"></div>
+        </section>
+        <?php
+    }
+
+    public function ajax_queue_static_assets() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        if (!$this->queue_manager || !$this->ensure_bucket_available(0)) {
+            wp_send_json_error('AWS queue is not configured.');
+        }
+
+        $results = array('queued' => 0, 'skipped' => 0, 'failed' => 0);
+        foreach ($this->get_static_asset_files() as $asset) {
+            try {
+                $queued = $this->queue_manager->queue_static_asset($asset['path'], $asset['key'], $asset['mime']);
+                $queued ? $results['queued']++ : $results['skipped']++;
+            } catch (Exception $e) {
+                $results['failed']++;
+            }
+        }
+        wp_send_json_success($results);
+    }
+
+    private function get_static_asset_files() {
+        $roots = array(ABSPATH . WPINC, WP_CONTENT_DIR . '/plugins', WP_CONTENT_DIR . '/themes');
+        $assets = array();
+        foreach ($roots as $root) {
+            if (!is_dir($root)) {
+                continue;
+            }
+            try {
+                $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
+                foreach ($iterator as $file) {
+                    if (!$file->isFile() || !preg_match('/\.(?:js|css)$/i', $file->getFilename())) {
+                        continue;
+                    }
+                    $path = $file->getPathname();
+                    if (strpos($path, DIRECTORY_SEPARATOR . 'node_modules' . DIRECTORY_SEPARATOR) !== false) {
+                        continue;
+                    }
+                    $relative = ltrim(str_replace(wp_normalize_path(ABSPATH), '', wp_normalize_path($path)), '/');
+                    $assets[] = array(
+                        'path' => $path,
+                        'key' => 'wp-static/' . $relative,
+                        'mime' => strtolower(pathinfo($path, PATHINFO_EXTENSION)) === 'css' ? 'text/css' : 'application/javascript'
+                    );
+                }
+            } catch (UnexpectedValueException $e) {
+                continue;
+            }
+        }
+        return $assets;
     }
 
     private function format_file_size($bytes) {
@@ -3922,7 +4006,7 @@ file_put_contents($temp_file, $test_content);
         if ($has_s3_files && !empty($this->cloudfront_domain)) {
             echo '<input type="hidden" name="enhanced_s3_settings[use_cloudfront]" value="1">';
             echo '<input type="checkbox" checked disabled> <strong>Enabled (locked - files already using CloudFront)</strong>';
-            echo '<p class="description" style="color: #d63638;">CloudFront cannot be disabled after files have been uploaded with CloudFront URLs.</p>';
+            echo '<p class="description">CloudFront remains configured. Delivery can be switched between CDN and local WordPress URLs below.</p>';
         } elseif ($has_s3_files && empty($this->cloudfront_domain)) {
             echo '<input type="checkbox" name="enhanced_s3_settings[use_cloudfront]" value="1" ' . checked($value, true, false) . ' disabled>';
             echo '<p class="description" style="color: #d63638;">CloudFront cannot be enabled after files have been uploaded without it. This would break existing URLs.</p>';
@@ -3930,6 +4014,18 @@ file_put_contents($temp_file, $test_content);
             echo '<input type="checkbox" name="enhanced_s3_settings[use_cloudfront]" value="1" ' . checked($value, true, false) . '>';
             echo '<p class="description">Automatically create and use CloudFront distribution</p>';
         }
+    }
+
+    public function serve_media_from_cdn_field() {
+        $value = $this->get_option('serve_media_from_cdn', $this->use_cloudfront);
+        echo '<label><input type="checkbox" name="enhanced_s3_settings[serve_media_from_cdn]" value="1" ' . checked($value, true, false) . '> Deliver offloaded media through CloudFront</label>';
+        echo '<p class="description">Turn this off to return attachment URLs to local WordPress storage without deleting either copy.</p>';
+    }
+
+    public function serve_static_assets_from_cdn_field() {
+        $value = $this->get_option('serve_static_assets_from_cdn', false);
+        echo '<label><input type="checkbox" name="enhanced_s3_settings[serve_static_assets_from_cdn]" value="1" ' . checked($value, true, false) . '> Deliver uploaded JavaScript and CSS through CloudFront</label>';
+        echo '<p class="description">Only assets uploaded through the Static Assets panel are eligible. Turn this off for immediate local delivery.</p>';
     }
 
     private function has_existing_s3_files() {
@@ -3977,9 +4073,9 @@ file_put_contents($temp_file, $test_content);
     }
     
     public function auto_delete_local_field() {
-        $value = $this->get_option('auto_delete_local');
-        echo '<input type="checkbox" name="enhanced_s3_settings[auto_delete_local]" value="1" ' . checked($value, true, false) . '>';
-        echo '<p class="description">Automatically delete local files after successful S3 upload</p>';
+        echo '<input type="hidden" name="enhanced_s3_settings[auto_delete_local]" value="0">';
+        echo '<input type="checkbox" disabled>';
+        echo '<p class="description">Local copies are always retained to keep WordPress URLs available when CDN delivery is disabled.</p>';
     }
 
     public function ai_section_callback() {
@@ -4169,6 +4265,8 @@ file_put_contents($temp_file, $test_content);
         // Checkbox fields
         $checkbox_fields = array(
             'use_cloudfront', 
+            'serve_media_from_cdn',
+            'serve_static_assets_from_cdn',
             'upload_thumbnails', 
             'auto_delete_local',
             'compress_images',
@@ -4185,6 +4283,7 @@ file_put_contents($temp_file, $test_content);
         foreach ($checkbox_fields as $field) {
             $new_settings[$field] = isset($settings[$field]) && $settings[$field] === '1' ? '1' : '';
         }
+        $new_settings['auto_delete_local'] = '';
 
         // Handle file types array
         if (isset($settings['auto_upload_file_types']) && is_array($settings['auto_upload_file_types'])) {
@@ -4223,14 +4322,14 @@ file_put_contents($temp_file, $test_content);
         $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
         $stored_url = get_post_meta($attachment_id, 'enhanced_s3_url', true);
         
-        if (!empty($s3_key)) {
+        if ($this->serve_media_from_cdn && !empty($s3_key)) {
             $resolved = $this->get_s3_url($s3_key);
             if (!empty($resolved)) {
                 return $resolved;
             }
         }
         
-        if (!empty($stored_url)) {
+        if ($this->serve_media_from_cdn && !empty($stored_url)) {
             return esc_url($stored_url);
         }
         
@@ -4244,7 +4343,7 @@ file_put_contents($temp_file, $test_content);
         $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
         $stored_url = get_post_meta($attachment_id, 'enhanced_s3_url', true);
         
-        if (!empty($s3_key)) {
+        if ($this->serve_media_from_cdn && !empty($s3_key)) {
             $s3_dir = dirname($s3_key);
             foreach ($sources as $width => $source) {
                 $filename = basename($source['url']);
@@ -4257,7 +4356,7 @@ file_put_contents($temp_file, $test_content);
             return $sources;
         }
         
-        if (!empty($stored_url)) {
+        if ($this->serve_media_from_cdn && !empty($stored_url)) {
             $base = trailingslashit(untrailingslashit(dirname($stored_url)));
             foreach ($sources as $width => $source) {
                 $filename = basename($source['url']);
@@ -4281,6 +4380,41 @@ file_put_contents($temp_file, $test_content);
         }
 
         return 'https://' . $this->bucket_name . '.' . $this->s3_endpoint . '/' . $s3_key;
+    }
+
+    public function get_static_asset_url($url, $handle) {
+        if (!$this->serve_static_assets_from_cdn || !$this->use_cloudfront || empty($this->cloudfront_domain)) {
+            return $url;
+        }
+
+        $path = wp_parse_url($url, PHP_URL_PATH);
+        $query = wp_parse_url($url, PHP_URL_QUERY);
+        if (empty($path)) {
+            return $url;
+        }
+
+        $site_path = wp_parse_url(site_url('/'), PHP_URL_PATH);
+        if (!empty($site_path) && strpos($path, $site_path) === 0) {
+            $path = substr($path, strlen($site_path));
+        }
+        $relative_path = ltrim(rawurldecode($path), '/');
+        if (strpos($relative_path, 'wp-includes/') !== 0 && strpos($relative_path, 'wp-content/plugins/') !== 0 && strpos($relative_path, 'wp-content/themes/') !== 0) {
+            return $url;
+        }
+
+        $s3_key = 'wp-static/' . $relative_path;
+        $uploaded_assets = get_option('enhanced_s3_static_asset_manifest', array());
+        if (!is_array($uploaded_assets) || empty($uploaded_assets[$s3_key])) {
+            return $url;
+        }
+
+        $local_path = ABSPATH . str_replace('/', DIRECTORY_SEPARATOR, $relative_path);
+        if (!is_file($local_path) || md5_file($local_path) !== $uploaded_assets[$s3_key]) {
+            return $url;
+        }
+
+        $cdn_url = 'https://' . $this->cloudfront_domain . '/' . str_replace('%2F', '/', rawurlencode($s3_key));
+        return $query ? $cdn_url . '?' . $query : $cdn_url;
     }
 
     // Replace the ajax_download_all_s3_files method

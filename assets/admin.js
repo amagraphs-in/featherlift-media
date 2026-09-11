@@ -929,6 +929,31 @@
                 manualUploadAll();
             }
         });
+
+        $('#queue-static-assets').on('click', function() {
+            if (!confirm('Queue JavaScript and CSS from WordPress core, plugins, and themes for S3 upload?')) {
+                return;
+            }
+            var $button = $(this);
+            var $status = $('#static-assets-status');
+            $button.prop('disabled', true).text('Queueing...');
+            $status.html('<div class="notice notice-info inline"><p>Scanning and queueing static assets...</p></div>');
+            $.post(enhancedS3Ajax.ajaxurl, {
+                action: 'queue_static_assets',
+                nonce: enhancedS3Ajax.nonce
+            }).done(function(response) {
+                if (response && response.success) {
+                    var data = response.data;
+                    $status.html('<div class="notice notice-success inline"><p>Queued ' + data.queued + ' assets; ' + data.skipped + ' already queued; ' + data.failed + ' failed.</p></div>');
+                } else {
+                    $status.html('<div class="notice notice-error inline"><p>' + (response.data || 'Unable to queue static assets.') + '</p></div>');
+                }
+            }).fail(function() {
+                $status.html('<div class="notice notice-error inline"><p>Network error while queueing static assets.</p></div>');
+            }).always(function() {
+                $button.prop('disabled', false).text('Queue All JavaScript & CSS');
+            });
+        });
         
         // Retry failed operations
         $('#retry-failed').on('click', function() {
@@ -1149,7 +1174,7 @@
         
         // Selection helper buttons
         $('#select-all-local').on('click', function() {
-            $('input[name="attachment_ids[]"][data-local-exists="1"][data-is-s3="0"]').prop('checked', true);
+            $('input[name="attachment_ids[]"][data-local-exists="1"]').prop('checked', true);
             updateButtonStates();
         });
         
@@ -1162,10 +1187,16 @@
             $('input[name="attachment_ids[]"]').prop('checked', false);
             updateButtonStates();
         });
+
+        $('#upload-current-page').on('click', function() {
+            $('input[name="attachment_ids[]"][data-local-exists="1"]').prop('checked', true);
+            performBulkUpload();
+        });
         
         // Bulk operation buttons
         $('#bulk-upload').on('click', performBulkUpload);
         $('#bulk-download').on('click', performBulkDownload);
+        $('#bulk-process-media').on('click', performBulkMediaWorkflow);
         $('#bulk-generate-alt').on('click', performBulkAltGeneration);
     }
 
@@ -1174,6 +1205,7 @@
         var uploadCount = 0;
         var downloadCount = 0;
         var altCount = 0;
+        var processCount = 0;
         
         selectedBoxes.each(function() {
             var $this = $(this);
@@ -1181,7 +1213,7 @@
             var localExists = $this.data('local-exists') == '1';
             var isImage = $this.data('is-image') == '1';
             
-            if (localExists && !isS3) {
+            if (localExists) {
                 uploadCount++;
             }
             if (isS3) {
@@ -1189,6 +1221,9 @@
             }
             if (isImage) {
                 altCount++;
+                if (localExists) {
+                    processCount++;
+                }
             }
         });
         
@@ -1197,14 +1232,94 @@
         
         $('#bulk-upload').prop('disabled', uploadCount === 0);
         $('#bulk-download').prop('disabled', downloadCount === 0);
+        $('#bulk-process-media').prop('disabled', processCount === 0);
         $('#bulk-generate-alt').prop('disabled', altCount === 0);
+    }
+
+    function performBulkMediaWorkflow() {
+        var selectedIds = [];
+        $('input[name="attachment_ids[]"]:checked').each(function() {
+            var $item = $(this);
+            if ($item.data('local-exists') == '1' && $item.data('is-image') == '1') {
+                selectedIds.push($item.val());
+            }
+        });
+
+        if (!selectedIds.length) {
+            alert('Select at least one local image.');
+            return;
+        }
+        if (!confirm('Optimize ' + selectedIds.length + ' image(s), queue S3 upload, then generate alt text?')) {
+            return;
+        }
+
+        var $button = $('#bulk-process-media');
+        $button.prop('disabled', true);
+        showProgress('Optimizing selected images...');
+        var finish = function() {
+            hideProgress();
+            $button.prop('disabled', false);
+        };
+
+        $.post(enhancedS3Ajax.ajaxurl, {
+            action: 'bulk_optimize_media',
+            attachment_ids: selectedIds,
+            nonce: enhancedS3Ajax.nonce
+        }).done(function(optimizeResponse) {
+            if (!optimizeResponse || !optimizeResponse.success) {
+                alert('Optimization failed: ' + ((optimizeResponse && optimizeResponse.data) || 'Unknown error'));
+                finish();
+                return;
+            }
+
+            $('#progress-text').text('Queueing S3 uploads...');
+            $.post(enhancedS3Ajax.ajaxurl, {
+                action: 'bulk_s3_upload',
+                attachment_ids: selectedIds,
+                nonce: enhancedS3Ajax.nonce
+            }).done(function(uploadResponse) {
+                if (!uploadResponse || !uploadResponse.success) {
+                    alert('Upload queue failed: ' + ((uploadResponse && uploadResponse.data) || 'Unknown error'));
+                    finish();
+                    return;
+                }
+
+                $('#progress-text').text('Generating and saving alt text...');
+                $.post(enhancedS3Ajax.ajaxurl, {
+                    action: 'bulk_generate_ai_alt_tags',
+                    attachment_ids: selectedIds,
+                    nonce: enhancedS3Ajax.nonce
+                }).done(function(altResponse) {
+                    if (!altResponse || !altResponse.success) {
+                        alert('Uploads were queued, but alt text failed: ' + ((altResponse && altResponse.data) || 'Unknown error'));
+                        finish();
+                        return;
+                    }
+                    var optimized = optimizeResponse.data || {};
+                    var uploaded = uploadResponse.data || {};
+                    var alt = altResponse.data || {};
+                    alert('Workflow complete. Optimized: ' + (optimized.success || 0) + ', uploads queued: ' + (uploaded.success || 0) + ', alt text saved: ' + (alt.success || 0) + ', skipped: ' + (alt.skipped || 0) + '.');
+                    location.reload();
+                }).fail(function() {
+                    alert('Uploads were queued, but the alt text request failed.');
+                }).always(function() {
+                    finish();
+                });
+            }).fail(function() {
+                finish();
+                alert('Network error while queueing uploads.');
+            });
+        }).fail(function() {
+            finish();
+            alert('Network error while optimizing images.');
+        });
     }
 
     function performBulkUpload() {
         var selectedIds = [];
         $('input[name="attachment_ids[]"]:checked').each(function() {
             var $this = $(this);
-            if ($this.data('local-exists') == '1' && $this.data('is-s3') != '1') {
+            if ($this.data('local-exists') == '1') {
                 selectedIds.push($(this).val());
             }
         });
