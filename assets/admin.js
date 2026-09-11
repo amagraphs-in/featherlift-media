@@ -897,7 +897,9 @@
                         $status.html('<div class="notice ' + klass + ' inline"><p>' + note + '</p></div>');
                     }
                 } else {
-                    var msg = response.data && response.data.message ? response.data.message : enhancedS3Ajax.strings.alt_error;
+                    var msg = response && typeof response.data === 'string'
+                        ? response.data
+                        : (response && response.data && response.data.message ? response.data.message : enhancedS3Ajax.strings.alt_error);
                     if ($status.length) {
                         $status.html('<div class="notice notice-error inline"><p>' + msg + '</p></div>');
                     }

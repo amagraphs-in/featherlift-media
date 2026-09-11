@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.5
+ * Version: 1.1.6
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.5';
+    private $version = '1.1.6';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -2946,7 +2946,12 @@ file_put_contents($temp_file, $test_content);
                             </button>
                         <?php endif; ?>
                     <?php else: ?>
-                        <p class="description">Add AWS credentials in FeatherLift settings to enable offloading.</p>
+                        <?php $has_saved_aws_credentials = $this->has_stored_secret('access_key') && $this->has_stored_secret('secret_key'); ?>
+                        <p class="description">
+                            <?php echo $has_saved_aws_credentials
+                                ? esc_html__('Saved AWS credentials could not be read. Re-enter both keys in FeatherLift settings and save changes.', 'enhanced-s3')
+                                : esc_html__('Add and save AWS credentials in FeatherLift settings to enable offloading.', 'enhanced-s3'); ?>
+                        </p>
                     <?php endif; ?>
                     <div class="operation-status" id="status-<?php echo $post->ID; ?>" style="margin-top: 10px;"></div>
                 </div>
