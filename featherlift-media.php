@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.4
+ * Version: 1.1.5
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.4';
+    private $version = '1.1.5';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -217,6 +217,8 @@ class Enhanced_S3_Media_Upload {
         add_action('wp_ajax_bulk_s3_download', array($this, 'ajax_bulk_s3_download'));
         add_action('wp_ajax_manual_upload_all', array($this, 'ajax_manual_upload_all'));
         add_action('wp_ajax_queue_static_assets', array($this, 'ajax_queue_static_assets'));
+        add_action('wp_ajax_simple_reset', array($this, 'ajax_simple_reset'));
+        add_action('wp_ajax_reset_aws_resources', array($this, 'ajax_reset_aws_resources'));
         add_action('wp_ajax_retry_failed_operations', array($this, 'ajax_retry_failed_operations'));
         add_action('wp_ajax_generate_ai_alt_tag', array($this, 'ajax_generate_ai_alt_tag'));
         add_action('wp_ajax_bulk_generate_ai_alt_tags', array($this, 'ajax_bulk_generate_ai_alt_tags'));
@@ -1042,6 +1044,10 @@ class Enhanced_S3_Media_Upload {
         
         $download_files = isset($_POST['download_files']) && $_POST['download_files'] === 'true';
         $delete_aws_resources = isset($_POST['delete_aws_resources']) && $_POST['delete_aws_resources'] === 'true';
+
+        if ($download_files) {
+            wp_send_json_error('Download recovery runs in the background. Use "Download All S3 Files to Local Storage", wait for the queue to finish, then reset the configuration.');
+        }
         
         try {
             $results = array();
@@ -1080,6 +1086,21 @@ class Enhanced_S3_Media_Upload {
             
             wp_send_json_success($message);
             
+        } catch (Exception $e) {
+            wp_send_json_error('Reset failed: ' . $e->getMessage());
+        }
+    }
+
+    public function ajax_simple_reset() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        try {
+            $this->reset_plugin_configuration();
+            wp_send_json_success('Plugin configuration reset. AWS files and your local WordPress media were not deleted.');
         } catch (Exception $e) {
             wp_send_json_error('Reset failed: ' . $e->getMessage());
         }
@@ -1521,7 +1542,9 @@ class Enhanced_S3_Media_Upload {
 
         $has_optimize = ($this->optimize_media || $this->compress_images || $this->auto_resize_images);
         $has_offload = ($this->offload_media && $this->is_configured());
-        $plugin_status = 'Not configured';
+        $aws_ready = $this->is_configured();
+        $infrastructure_ready = $aws_ready && !empty($this->bucket_name) && !empty($this->sqs_queue_url);
+        $plugin_status = $infrastructure_ready ? 'Ready - select a workflow' : ($aws_ready ? 'Credentials saved - finish AWS setup' : 'Credentials required');
         if ($has_optimize && $has_offload) {
             $plugin_status = 'Optimize + Offload';
         } elseif ($has_optimize) {
@@ -1530,7 +1553,6 @@ class Enhanced_S3_Media_Upload {
             $plugin_status = 'Offload';
         }
 
-        $aws_ready = $this->is_configured();
         $aws_status = $aws_ready ? 'Enabled' : 'Disabled';
         $aws_detail = $aws_ready ? (!empty($this->bucket_name) && !empty($this->sqs_queue_url) ? 'Bucket + Queue connected' : 'Credentials saved') : 'Add AWS credentials to unlock';
 
@@ -4810,8 +4832,7 @@ file_put_contents($temp_file, $test_content);
             'compression_quality' => $current_settings['compression_quality'] ?? 85,
             'tinypng_api_key' => $current_settings['tinypng_api_key'] ?? '',
             'upload_thumbnails' => $current_settings['upload_thumbnails'] ?? '1',
-            'auto_delete_local' => $current_settings['auto_delete_local'] ?? '',
-            'use_cloudfront' => $current_settings['use_cloudfront'] ?? '',
+            'auto_delete_local' => '',
             'bucket_autoname_strategy' => $current_settings['bucket_autoname_strategy'] ?? 'file',
             'preserve_bucket_permissions' => $current_settings['preserve_bucket_permissions'] ?? '1',
             'auto_resize_images' => $current_settings['auto_resize_images'] ?? '',
@@ -4821,12 +4842,16 @@ file_put_contents($temp_file, $test_content);
             // Reset these
             'bucket_name' => '',
             's3_prefix' => 'wp-content/uploads/',
+            'use_cloudfront' => '',
+            'serve_media_from_cdn' => '',
+            'serve_static_assets_from_cdn' => '',
             'cloudfront_domain' => '',
             'cloudfront_distribution_id' => '',
             'sqs_queue_url' => ''
         );
         
         update_option('enhanced_s3_settings', $reset_settings);
+        delete_option('enhanced_s3_static_asset_manifest');
         
         if (function_exists('wp_cache_flush')) {
             wp_cache_flush();
