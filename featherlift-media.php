@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.7
+ * Version: 1.1.8
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.7';
+    private $version = '1.1.8';
     private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
@@ -3458,7 +3458,7 @@ file_put_contents($temp_file, $test_content);
 
             if ($salt === '') {
                 $system_fingerprint = function_exists('php_uname') ? php_uname() : 'featherlift-media';
-                $salt = hash('sha256', __FILE__ . '|' . $system_fingerprint . '|' . microtime(true));
+                $salt = hash('sha256', __FILE__ . '|' . $system_fingerprint);
             }
         }
 
@@ -4318,7 +4318,19 @@ file_put_contents($temp_file, $test_content);
             if ($clear) {
                 $new_settings[$field] = '';
             } elseif ($incoming !== '') {
-                $new_settings[$field] = $this->encrypt_sensitive_value(sanitize_text_field($incoming));
+                $value = sanitize_text_field($incoming);
+                $encrypted = $this->encrypt_sensitive_value($value);
+                if ($this->decrypt_sensitive_value($encrypted) !== $value) {
+                    add_settings_error(
+                        'enhanced_s3_settings',
+                        'enhanced_s3_secret_encryption_failed',
+                        sprintf('Could not securely save %s. Check that OpenSSL is available on this server.', $field),
+                        'error'
+                    );
+                    $new_settings[$field] = isset($existing_settings[$field]) ? $existing_settings[$field] : '';
+                } else {
+                    $new_settings[$field] = $encrypted;
+                }
             } elseif ($masked && isset($existing_settings[$field])) {
                 $new_settings[$field] = $existing_settings[$field];
             } else {
