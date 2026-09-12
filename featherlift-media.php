@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.9
+ * Version: 1.1.10
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.9';
+    private $version = '1.1.10';
     private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
@@ -3442,9 +3442,15 @@ file_put_contents($temp_file, $test_content);
 
     private function get_persistent_encryption_key() {
         $option_name = 'enhanced_s3_secret_encryption_key';
-        $key = get_option($option_name, '');
-        if (is_string($key) && strlen($key) === 32) {
-            return $key;
+        $stored_key = get_option($option_name, '');
+        if (is_string($stored_key) && preg_match('/^[a-f0-9]{64}$/i', $stored_key)) {
+            return hex2bin($stored_key);
+        }
+
+        // Migrate the raw-binary key written by v1.1.9 when it survived intact.
+        if (is_string($stored_key) && strlen($stored_key) === 32) {
+            update_option($option_name, bin2hex($stored_key), false);
+            return $stored_key;
         }
 
         try {
@@ -3453,9 +3459,8 @@ file_put_contents($temp_file, $test_content);
             $key = hash('sha256', wp_generate_password(64, true, true) . '|' . microtime(true), true);
         }
 
-        add_option($option_name, $key, '', false);
-        $stored_key = get_option($option_name, $key);
-        return is_string($stored_key) && strlen($stored_key) === 32 ? $stored_key : $key;
+        update_option($option_name, bin2hex($key), false);
+        return $key;
     }
 
     private function get_encryption_key() {
