@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.8
+ * Version: 1.1.9
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.8';
+    private $version = '1.1.9';
     private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
@@ -3396,7 +3396,7 @@ file_put_contents($temp_file, $test_content);
         }
 
         try {
-            $key = $this->get_encryption_key();
+            $key = $this->get_persistent_encryption_key();
             if (function_exists('random_bytes')) {
                 $iv = random_bytes(16);
             } elseif (function_exists('openssl_random_pseudo_bytes')) {
@@ -3410,29 +3410,52 @@ file_put_contents($temp_file, $test_content);
                 return $value;
             }
 
-            return 'enc::' . base64_encode($iv . $encrypted);
+            return 'enc2::' . base64_encode($iv . $encrypted);
         } catch (Exception $e) {
             return $value;
         }
     }
 
     private function decrypt_sensitive_value($value) {
-        if ($value === '' || strpos($value, 'enc::') !== 0 || !function_exists('openssl_decrypt')) {
+        if ($value === '' || !function_exists('openssl_decrypt')) {
             return $value;
         }
 
-        $payload = base64_decode(substr($value, 5), true);
+        $is_current_format = strpos($value, 'enc2::') === 0;
+        if (!$is_current_format && strpos($value, 'enc::') !== 0) {
+            return $value;
+        }
+
+        $payload = base64_decode(substr($value, $is_current_format ? 6 : 5), true);
         if ($payload === false || strlen($payload) <= 16) {
             return '';
         }
 
         $iv = substr($payload, 0, 16);
         $ciphertext = substr($payload, 16);
-        $key = $this->get_encryption_key();
+        $key = $is_current_format ? $this->get_persistent_encryption_key() : $this->get_encryption_key();
 
         $decrypted = openssl_decrypt($ciphertext, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
 
         return $decrypted !== false ? $decrypted : '';
+    }
+
+    private function get_persistent_encryption_key() {
+        $option_name = 'enhanced_s3_secret_encryption_key';
+        $key = get_option($option_name, '');
+        if (is_string($key) && strlen($key) === 32) {
+            return $key;
+        }
+
+        try {
+            $key = random_bytes(32);
+        } catch (Exception $e) {
+            $key = hash('sha256', wp_generate_password(64, true, true) . '|' . microtime(true), true);
+        }
+
+        add_option($option_name, $key, '', false);
+        $stored_key = get_option($option_name, $key);
+        return is_string($stored_key) && strlen($stored_key) === 32 ? $stored_key : $key;
     }
 
     private function get_encryption_key() {
