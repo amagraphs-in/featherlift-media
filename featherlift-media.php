@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.6
+ * Version: 1.1.7
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,8 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.6';
+    private $version = '1.1.7';
+    private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -225,6 +226,7 @@ class Enhanced_S3_Media_Upload {
         
         // Test connection AJAX handlers
         add_action('wp_ajax_test_s3_connection', array($this, 'ajax_test_s3_connection'));
+        add_action('wp_ajax_test_storage_cdn_setup', array($this, 'ajax_test_storage_cdn_setup'));
         add_action('wp_ajax_test_cloudfront_connection', array($this, 'ajax_test_cloudfront_connection'));
         add_action('wp_ajax_test_sqs_connection', array($this, 'ajax_test_sqs_connection'));
         add_action('wp_ajax_get_log_stats', array($this, 'ajax_get_log_stats'));
@@ -475,12 +477,7 @@ class Enhanced_S3_Media_Upload {
             return;
         }
 
-        try {
-            $result = $this->provision_aws_stack();
-            $this->store_setup_notice($result['message']);
-        } catch (Exception $e) {
-            $this->store_setup_notice('Automatic AWS provisioning failed: ' . $e->getMessage(), 'error');
-        }
+        $this->store_setup_notice('AWS settings saved. Use Setup AWS Resources after providing the required S3 bucket and CloudFront domain.', 'updated');
     }
 
     private function store_setup_notice($message, $type = 'updated') {
@@ -515,21 +512,9 @@ class Enhanced_S3_Media_Upload {
         $bucket_name = $this->bucket_name;
 
         if (empty($bucket_name)) {
-            $custom_bucket = trim($this->get_option('bucket_name'));
-            if (!empty($custom_bucket)) {
-                $bucket_name = strtolower(preg_replace('/[^a-z0-9-]/', '', $custom_bucket));
-                if (strlen($bucket_name) < 3 || strlen($bucket_name) > 63) {
-                    throw new Exception('Bucket name must be between 3 and 63 characters.');
-                }
-            } else {
-                $site_name = sanitize_title(get_bloginfo('name'));
-                $unique_id = substr(md5(get_site_url()), 0, 8);
-                $bucket_name = substr(strtolower(preg_replace('/[^a-z0-9-]/', '', $site_name)), 0, 40);
-                $bucket_name = trim($bucket_name, '-');
-                if (empty($bucket_name)) {
-                    $bucket_name = 'wp-media';
-                }
-                $bucket_name .= '-' . $unique_id;
+            $bucket_name = $this->required_bucket_name;
+            if (trim($this->get_option('bucket_name')) !== $bucket_name) {
+                throw new Exception('S3 bucket must be set to ' . $bucket_name . ' before setup.');
             }
 
             $bucket_result = $this->aws_sdk->create_s3_bucket($bucket_name, array(
@@ -561,15 +546,7 @@ class Enhanced_S3_Media_Upload {
         }
 
         if ($this->use_cloudfront && empty($this->cloudfront_domain)) {
-            $target_bucket = !empty($updates['bucket_name']) ? $updates['bucket_name'] : $this->bucket_name;
-            $cloudfront_result = $this->aws_sdk->create_cloudfront_distribution($target_bucket);
-            if (empty($cloudfront_result['success'])) {
-                throw new Exception('Failed to create CloudFront distribution: ' . ($cloudfront_result['error'] ?? 'unknown error'));
-            }
-            if (!empty($cloudfront_result['domain'])) {
-                $updates['cloudfront_domain'] = $cloudfront_result['domain'];
-                $updates['cloudfront_distribution_id'] = $cloudfront_result['distribution_id'] ?? '';
-            }
+            throw new Exception('Enter and save your CloudFront domain before setup.');
         }
 
         if (empty($this->options['s3_prefix'])) {
@@ -1726,6 +1703,9 @@ class Enhanced_S3_Media_Upload {
                 <?php endif; ?>
                 <div class="aws-test-block">
                     <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
+                    <?php if (!empty($this->bucket_name) && $this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
+                        <button type="button" id="test-storage-cdn-setup" class="button button-primary"><?php esc_html_e('Test S3 & CloudFront Setup', 'enhanced-s3'); ?></button>
+                    <?php endif; ?>
                     <button type="button" id="test-s3-connection" class="button button-secondary"><?php esc_html_e('Test S3 Connection', 'enhanced-s3'); ?></button>
                     <?php if ($this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
                         <button type="button" id="test-cloudfront-connection" class="button button-secondary"><?php esc_html_e('Test CloudFront Connection', 'enhanced-s3'); ?></button>
@@ -1749,6 +1729,25 @@ class Enhanced_S3_Media_Upload {
             });
 
             // Test S3 Connection
+            $('#test-storage-cdn-setup').on('click', function(e) {
+                e.preventDefault();
+                var $button = $(this);
+                var $result = $('#connection-result');
+                $button.prop('disabled', true).text('Testing setup...');
+                $result.html('<p>Testing S3 upload and CloudFront delivery...</p>');
+                $.post(ajaxurl, { action: 'test_storage_cdn_setup', nonce: enhancedS3Ajax.nonce })
+                    .done(function(response) {
+                        var message = response && response.data ? response.data : 'Unable to test S3 and CloudFront.';
+                        $result.html('<div class="notice notice-' + (response && response.success ? 'success' : 'error') + ' inline"><p>' + message + '</p></div>');
+                    })
+                    .fail(function() {
+                        $result.html('<div class="notice notice-error inline"><p>Network error occurred.</p></div>');
+                    })
+                    .always(function() {
+                        $button.prop('disabled', false).text('Test S3 & CloudFront Setup');
+                    });
+            });
+
             $('#test-s3-connection').on('click', function(e) {
                 e.preventDefault();
                 var $button = $(this);
@@ -2576,6 +2575,56 @@ file_put_contents($temp_file, $test_content);
             wp_send_json_error('S3 connection error: ' . $e->getMessage());
         }
     }
+
+    /**
+     * AJAX: Verify that an S3 object can be delivered through CloudFront.
+     */
+    public function ajax_test_storage_cdn_setup() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        if (!$this->aws_sdk || empty($this->bucket_name)) {
+            wp_send_json_error('Save AWS credentials and configure the S3 bucket before testing.');
+        }
+        if (!$this->use_cloudfront || empty($this->cloudfront_domain)) {
+            wp_send_json_error('Enable CloudFront and enter its domain before testing.');
+        }
+
+        $test_key = 'featherlift-connection-test-' . wp_generate_uuid4() . '.txt';
+        $temp_file = tempnam(sys_get_temp_dir(), 'featherlift-s3-test-');
+        if (!$temp_file || file_put_contents($temp_file, 'FeatherLift Media connection test') === false) {
+            wp_send_json_error('Unable to create a temporary test file.');
+        }
+
+        try {
+            $upload = $this->aws_sdk->upload_file_to_s3($temp_file, $this->bucket_name, $test_key, 'text/plain');
+            if (empty($upload['success'])) {
+                wp_send_json_error('S3 upload failed: ' . ($upload['error'] ?? 'Unknown error'));
+            }
+
+            $response = wp_remote_get('https://' . $this->cloudfront_domain . '/' . $test_key, array('timeout' => 15));
+            $this->aws_sdk->delete_file_from_s3($this->bucket_name, $test_key);
+
+            if (is_wp_error($response)) {
+                wp_send_json_error('S3 upload succeeded, but CloudFront could not be reached: ' . $response->get_error_message());
+            }
+
+            $status_code = wp_remote_retrieve_response_code($response);
+            if ($status_code !== 200) {
+                wp_send_json_error('S3 upload succeeded, but CloudFront returned HTTP ' . $status_code . '. Wait for distribution deployment, then test again.');
+            }
+
+            wp_send_json_success('S3 upload and CloudFront delivery succeeded.');
+        } catch (Exception $e) {
+            wp_send_json_error('Setup test failed: ' . $e->getMessage());
+        } finally {
+            if (file_exists($temp_file)) {
+                unlink($temp_file);
+            }
+        }
+    }
     
     /**
      * AJAX: Test CloudFront Connection
@@ -3336,6 +3385,10 @@ file_put_contents($temp_file, $test_content);
         return isset($this->options[$key]) && $this->options[$key] !== '';
     }
 
+    private function has_usable_secret($key) {
+        return $this->get_option($key, '') !== '';
+    }
+
     private function encrypt_sensitive_value($value) {
         $value = trim((string) $value);
         if ($value === '' || !function_exists('openssl_encrypt')) {
@@ -3422,7 +3475,7 @@ file_put_contents($temp_file, $test_content);
             return false;
         }
 
-        $bucket_name = $this->generate_bucket_name($attachment_id);
+        $bucket_name = $this->required_bucket_name;
         $result = $this->aws_sdk->create_s3_bucket($bucket_name, array(
             'preserve_permissions' => $this->preserve_bucket_permissions
         ));
@@ -3442,29 +3495,7 @@ file_put_contents($temp_file, $test_content);
     }
 
     private function generate_bucket_name($attachment_id = null) {
-        $base = sanitize_title(get_bloginfo('name'));
-
-        if ($this->bucket_autoname_strategy === 'file' && $attachment_id) {
-            $file_path = get_attached_file($attachment_id);
-            if ($file_path) {
-                $filename = pathinfo($file_path, PATHINFO_FILENAME);
-                $base = strtolower(preg_replace('/[^a-z0-9-]/', '-', $filename));
-            }
-        }
-
-        if (empty($base)) {
-            $base = 'wp-media';
-        }
-
-        $base = trim(preg_replace('/-+/', '-', $base), '-');
-        if (strlen($base) < 3) {
-            $base = 'wp-media';
-        }
-
-        $unique = substr(md5($base . microtime(true) . wp_rand()), 0, 8);
-        $base = substr($base, 0, 40);
-
-        return $base . '-' . $unique;
+        return $this->required_bucket_name;
     }
 
     private function create_log_entry($attachment_id, $operation_type, $status = 'requested', $args = array()) {
@@ -3739,7 +3770,10 @@ file_put_contents($temp_file, $test_content);
 
     private function call_openai_for_alt($model, $prompt, $image_payload) {
         if (empty($this->openai_api_key)) {
-            return array('success' => false, 'error' => 'OpenAI API key missing.');
+            $error = $this->has_stored_secret('openai_api_key')
+                ? 'The saved OpenAI API key cannot be read. Re-enter the key in FeatherLift Media Settings and save changes.'
+                : 'OpenAI API key is not saved. Enter the key in FeatherLift Media Settings and save changes.';
+            return array('success' => false, 'error' => $error);
         }
 
         $body = array(
@@ -3909,12 +3943,13 @@ file_put_contents($temp_file, $test_content);
     
     public function access_key_field() {
         $has_value = $this->has_stored_secret('access_key');
+        $has_usable_value = $this->has_usable_secret('access_key');
         $placeholder = $has_value ? '********' : '';
         echo '<input type="text" name="enhanced_s3_settings[access_key]" value="" class="regular-text" placeholder="' . esc_attr($placeholder) . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[access_key_masked]" value="' . ($has_value ? '1' : '0') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[access_key_clear]" value="0">';
         if ($has_value) {
-            echo '<p class="description">Stored securely. Leave blank to keep. <button type="button" class="button-link enhanced-s3-clear-secret" data-field="access_key">Remove stored key</button></p>';
+            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and save changes.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="access_key">Remove stored key</button></p>';
         } else {
             echo '<p class="description">Enter your AWS access key ID</p>';
         }
@@ -3922,11 +3957,12 @@ file_put_contents($temp_file, $test_content);
     
     public function secret_key_field() {
         $has_value = $this->has_stored_secret('secret_key');
+        $has_usable_value = $this->has_usable_secret('secret_key');
         echo '<input type="password" name="enhanced_s3_settings[secret_key]" value="" class="regular-text" placeholder="' . ($has_value ? '********' : '') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[secret_key_masked]" value="' . ($has_value ? '1' : '0') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[secret_key_clear]" value="0">';
         if ($has_value) {
-            echo '<p class="description">Stored securely. Leave blank to keep. <button type="button" class="button-link enhanced-s3-clear-secret" data-field="secret_key">Remove stored key</button></p>';
+            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and save changes.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="secret_key">Remove stored key</button></p>';
         } else {
             echo '<p class="description">Enter your AWS secret access key</p>';
         }
@@ -3961,7 +3997,7 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function bucket_name_field() {
-        $value = $this->get_option('bucket_name');
+        $value = $this->get_option('bucket_name', $this->required_bucket_name);
         $is_configured = !empty($value);
         
         if ($is_configured) {
@@ -3971,8 +4007,8 @@ file_put_contents($temp_file, $test_content);
             echo '<p class="description" style="color: #d63638;">Bucket name is locked after creation to prevent breaking URLs.</p>';
         } else {
             // Not configured yet - allow custom input
-            echo '<input type="text" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($value) . '" class="regular-text" placeholder="my-custom-bucket-name">';
-            echo '<p class="description">Optional: Enter custom S3 bucket name (lowercase, numbers, hyphens only). Leave blank for auto-generated name.</p>';
+            echo '<input type="text" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($this->required_bucket_name) . '" class="regular-text" readonly>';
+            echo '<p class="description">Required: FeatherLift creates new buckets only as <code>ama-public-na</code>. Save this value before setup.</p>';
         }
     }
 
@@ -4017,7 +4053,7 @@ file_put_contents($temp_file, $test_content);
     public function cloudfront_domain_field() {
         $value = $this->get_option('cloudfront_domain', '');
         echo '<input type="text" name="enhanced_s3_settings[cloudfront_domain]" value="' . esc_attr($value) . '" class="regular-text" placeholder="dxxxx.cloudfront.net">';
-        echo '<p class="description">Optional: point to an existing CloudFront distribution instead of provisioning a new one.</p>';
+        echo '<p class="description">Required when CloudFront is enabled. Enter the domain of your existing distribution; FeatherLift does not create one automatically.</p>';
     }
 
     public function cloudfront_distribution_id_field() {
@@ -4039,7 +4075,7 @@ file_put_contents($temp_file, $test_content);
             echo '<p class="description" style="color: #d63638;">CloudFront cannot be enabled after files have been uploaded without it. This would break existing URLs.</p>';
         } else {
             echo '<input type="checkbox" name="enhanced_s3_settings[use_cloudfront]" value="1" ' . checked($value, true, false) . '>';
-            echo '<p class="description">Automatically create and use CloudFront distribution</p>';
+            echo '<p class="description">Use an existing CloudFront distribution. Its domain is required below.</p>';
         }
     }
 
@@ -4171,6 +4207,7 @@ file_put_contents($temp_file, $test_content);
 
     private function render_ai_secret_field($field, $description, $class, $agent_slug) {
         $has_value = $this->has_stored_secret($field);
+        $has_usable_value = $this->has_usable_secret($field);
         $style = $this->ai_agent === $agent_slug ? '' : ' style="display:none;"';
         echo '<div class="' . esc_attr($class) . '" data-agent="' . esc_attr($agent_slug) . '"' . $style . '>';
         echo '<input type="password" name="enhanced_s3_settings[' . esc_attr($field) . ']" value="" class="regular-text" placeholder="' . ($has_value ? '********' : '') . '">';
@@ -4178,7 +4215,7 @@ file_put_contents($temp_file, $test_content);
         echo '<input type="hidden" name="enhanced_s3_settings[' . esc_attr($field) . '_clear]" value="0">';
         $desc = esc_html($description);
         if ($has_value) {
-            $desc .= ' — stored securely.';
+            $desc .= $has_usable_value ? ' — stored securely.' : ' — stored value cannot be read; re-enter the key and save changes.';
             $desc .= ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="' . esc_attr($field) . '">Remove stored key</button>';
         }
         echo '<p class="description">' . $desc . '</p>';
@@ -4836,6 +4873,9 @@ file_put_contents($temp_file, $test_content);
             'compression_service' => $current_settings['compression_service'] ?? 'php_native',
             'compression_quality' => $current_settings['compression_quality'] ?? 85,
             'tinypng_api_key' => $current_settings['tinypng_api_key'] ?? '',
+            'openai_api_key' => $current_settings['openai_api_key'] ?? '',
+            'anthropic_api_key' => $current_settings['anthropic_api_key'] ?? '',
+            'custom_ai_api_key' => $current_settings['custom_ai_api_key'] ?? '',
             'upload_thumbnails' => $current_settings['upload_thumbnails'] ?? '1',
             'auto_delete_local' => '',
             'bucket_autoname_strategy' => $current_settings['bucket_autoname_strategy'] ?? 'file',
@@ -4843,6 +4883,12 @@ file_put_contents($temp_file, $test_content);
             'auto_resize_images' => $current_settings['auto_resize_images'] ?? '',
             'resize_max_width' => $current_settings['resize_max_width'] ?? 0,
             'resize_max_height' => $current_settings['resize_max_height'] ?? 0,
+            'ai_alt_enabled' => $current_settings['ai_alt_enabled'] ?? '',
+            'ai_agent' => $current_settings['ai_agent'] ?? 'openai',
+            'ai_model' => $current_settings['ai_model'] ?? 'gpt-4o-mini',
+            'ai_site_brief' => $current_settings['ai_site_brief'] ?? '',
+            'ai_skip_existing_alt' => $current_settings['ai_skip_existing_alt'] ?? '1',
+            'custom_ai_endpoint' => $current_settings['custom_ai_endpoint'] ?? '',
             
             // Reset these
             'bucket_name' => '',
