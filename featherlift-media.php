@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.16
+ * Version: 1.1.17
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.16';
+    private $version = '1.1.17';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -588,6 +588,17 @@ class Enhanced_S3_Media_Upload {
             $updates['s3_prefix'] = $this->get_site_s3_prefix();
         }
 
+        $tinypng_ready = !empty($this->tinypng_api_key);
+        if ($tinypng_ready) {
+            $updates['auto_upload_new_files'] = '1';
+            $updates['auto_upload_file_types'] = array('image');
+            $updates['optimize_media'] = '1';
+            $updates['offload_media'] = '1';
+            $updates['compress_images'] = '1';
+            $updates['compression_service'] = 'tinypng';
+            $updates['convert_to_webp'] = '1';
+        }
+
         if (!empty($updates)) {
             $this->persist_settings($updates);
         }
@@ -598,6 +609,8 @@ class Enhanced_S3_Media_Upload {
             'cloudfront_domain' => $this->cloudfront_domain,
             'cloudfront_distribution_id' => $this->cloudfront_distribution_id,
             'cloudfront_deploying' => $cloudfront_deploying,
+            'auto_upload_enabled' => (bool) $this->auto_upload_new_files,
+            'tinypng_ready' => $tinypng_ready,
             'message' => 'AWS resource setup completed successfully'
         );
     }
@@ -857,7 +870,7 @@ class Enhanced_S3_Media_Upload {
     public function auto_upload_new_files_field() {
         $value = $this->get_option('auto_upload_new_files');
         echo '<input type="checkbox" name="enhanced_s3_settings[auto_upload_new_files]" value="1" ' . checked($value, true, false) . '>';
-        echo '<p class="description">Automatically push every future upload to S3. Uncheck to keep new files local.</p>';
+        echo '<p class="description">Automatically process and deliver future image uploads. Set Up AWS enables this when a TinyPNG key is saved.</p>';
     }
     public function auto_upload_new_attachment($attachment_id) {
 

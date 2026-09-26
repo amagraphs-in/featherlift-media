@@ -394,6 +394,11 @@
                         if (response.data.cloudfront_deploying) {
                             $notice.append($('<p>').text('CloudFront is deploying. CDN delivery will become available after AWS finishes deployment.'));
                         }
+                        if (!response.data.auto_upload_enabled && !response.data.tinypng_ready) {
+                            $notice.append($('<p class="notice notice-warning inline">').text('AWS resources are ready, but automatic image processing needs a TinyPNG API key. Add it under Optimize & Resize, then run Set Up AWS again to enable TinyPNG, WebP, S3, and CloudFront processing for new images.'));
+                        } else if (!response.data.auto_upload_enabled) {
+                            $notice.append($('<p class="notice notice-warning inline">').text('Automatic processing is off. Enable “Automatically process future uploads” in Automation & Workflow.'));
+                        }
                         $status.empty().append($notice);
                     } else {
                         var $errorNotice = $('<div class="notice notice-error"><p></p></div>');
