@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.13
+ * Version: 1.1.14
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.13';
+    private $version = '1.1.14';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -509,7 +509,7 @@ class Enhanced_S3_Media_Upload {
         printf('<div class="%1$s"><p>%2$s</p></div>', esc_attr($class), esc_html($notice['message']));
     }
 
-    private function provision_aws_stack($resource = 'all') {
+    private function provision_aws_stack() {
         if (!$this->aws_sdk) {
             $this->init_aws_components();
         }
@@ -518,50 +518,30 @@ class Enhanced_S3_Media_Upload {
             throw new Exception('AWS SDK not initialized. Please verify credentials.');
         }
 
-        $allowed_resources = array('all', 'bucket', 'queue', 'cloudfront');
-        if (!in_array($resource, $allowed_resources, true)) {
-            throw new Exception('Unknown AWS resource requested.');
-        }
-
-        $credential_result = $this->aws_sdk->validate_credentials();
-        if (empty($credential_result['success'])) {
-            throw new Exception('AWS credential validation failed: ' . ($credential_result['error'] ?? 'unknown error'));
-        }
-
-        $steps = array(array(
-            'name' => 'AWS credentials',
-            'status' => 'complete'
-        ));
-        $create_bucket = in_array($resource, array('all', 'bucket', 'cloudfront'), true);
-        $create_queue = in_array($resource, array('all', 'queue'), true);
-        $create_cloudfront = in_array($resource, array('all', 'cloudfront'), true);
         $updates = array();
         $bucket_name = $this->bucket_name;
         $site_bucket_name = $this->generate_bucket_name();
 
-        if ($create_bucket && !empty($bucket_name) && $bucket_name !== $site_bucket_name && $this->has_existing_s3_files()) {
+        if (!empty($bucket_name) && $bucket_name !== $site_bucket_name && $this->has_existing_s3_files()) {
             throw new Exception('This site already has media offloaded to bucket ' . $bucket_name . '. Restore or migrate those files before switching to its new per-site bucket ' . $site_bucket_name . '.');
         }
 
-        if ($create_bucket) {
-            if (!empty($bucket_name) && $bucket_name !== $site_bucket_name) {
-                $updates['cloudfront_domain'] = '';
-                $updates['cloudfront_distribution_id'] = '';
-                $updates['use_cloudfront'] = '';
-                $updates['serve_media_from_cdn'] = '';
-            }
-            $bucket_name = $site_bucket_name;
-            $bucket_result = $this->aws_sdk->create_s3_bucket($bucket_name);
-
-            if (empty($bucket_result['success'])) {
-                throw new Exception('Failed to create S3 bucket: ' . ($bucket_result['error'] ?? 'unknown error'));
-            }
-
-            $updates['bucket_name'] = $bucket_result['bucket_name'] ?? $bucket_name;
-            $steps[] = array('name' => 'Per-site S3 bucket, public access, and CORS', 'status' => 'complete');
+        if (!empty($bucket_name) && $bucket_name !== $site_bucket_name) {
+            $updates['cloudfront_domain'] = '';
+            $updates['cloudfront_distribution_id'] = '';
+            $updates['use_cloudfront'] = '';
+            $updates['serve_media_from_cdn'] = '';
         }
 
-        if ($create_queue && empty($this->sqs_queue_url)) {
+        $bucket_name = $site_bucket_name;
+        $bucket_result = $this->aws_sdk->create_s3_bucket($bucket_name);
+        if (empty($bucket_result['success'])) {
+            throw new Exception('Failed to create or configure the per-site S3 bucket: ' . ($bucket_result['error'] ?? 'unknown error'));
+        }
+        $updates['bucket_name'] = $bucket_result['bucket_name'] ?? $bucket_name;
+
+        $queue_url = is_string($this->sqs_queue_url) ? trim($this->sqs_queue_url) : '';
+        if ($queue_url === '') {
             $site_name = sanitize_title(get_bloginfo('name'));
             $unique_id = substr(md5(get_site_url()), 0, 8);
             $queue_result = $this->aws_sdk->create_sqs_queue($site_name . '-' . $unique_id);
@@ -569,26 +549,21 @@ class Enhanced_S3_Media_Upload {
                 throw new Exception('Failed to create SQS queue: ' . ($queue_result['error'] ?? 'unknown error'));
             }
             $queue_url = $queue_result['queue_url'] ?? '';
-            if (isset($queue_result['CreateQueueResult']['QueueUrl'])) {
-                $queue_url = $queue_result['CreateQueueResult']['QueueUrl'];
-            }
             if (empty($queue_url)) {
                 throw new Exception('Unable to determine SQS queue URL.');
             }
             $updates['sqs_queue_url'] = $queue_url;
-            $steps[] = array('name' => 'SQS queue', 'status' => 'complete');
-        } elseif ($create_queue) {
-            $steps[] = array('name' => 'SQS queue', 'status' => 'already configured');
+        } else {
+            $queue_check = $this->aws_sdk->validate_sqs_queue($queue_url);
+            if (empty($queue_check['success'])) {
+                throw new Exception('The configured SQS queue is not reachable: ' . ($queue_check['error'] ?? 'unknown error'));
+            }
         }
 
-        $effective_bucket_name = $updates['bucket_name'] ?? $bucket_name;
         $effective_cloudfront_domain = $updates['cloudfront_domain'] ?? $this->cloudfront_domain;
-        if ($create_cloudfront && empty($effective_cloudfront_domain)) {
-            if (empty($effective_bucket_name)) {
-                throw new Exception('Create the S3 bucket before creating CloudFront.');
-            }
-
-            $cloudfront_result = $this->aws_sdk->create_cloudfront_distribution($effective_bucket_name);
+        $cloudfront_deploying = false;
+        if (empty($effective_cloudfront_domain)) {
+            $cloudfront_result = $this->aws_sdk->create_cloudfront_distribution($bucket_name);
             if (empty($cloudfront_result['success']) || empty($cloudfront_result['domain'])) {
                 throw new Exception('Failed to create CloudFront distribution: ' . ($cloudfront_result['error'] ?? 'unknown error'));
             }
@@ -597,14 +572,14 @@ class Enhanced_S3_Media_Upload {
             $updates['cloudfront_distribution_id'] = $cloudfront_result['distribution_id'] ?? '';
             $updates['use_cloudfront'] = '1';
             $updates['serve_media_from_cdn'] = '1';
-            $steps[] = array('name' => 'CloudFront distribution', 'status' => 'created; deployment is in progress');
-        } elseif ($create_cloudfront) {
-            $steps[] = array('name' => 'CloudFront distribution', 'status' => 'already configured');
+            $cloudfront_deploying = true;
+        } else {
+            $updates['use_cloudfront'] = '1';
+            $updates['serve_media_from_cdn'] = '1';
         }
 
         $current_prefix = trim($this->options['s3_prefix'] ?? '');
-        if (($resource === 'all' || $resource === 'bucket')
-            && !$this->has_existing_s3_files()
+        if (!$this->has_existing_s3_files()
             && ($current_prefix === '' || $current_prefix === 'wp-content/uploads/')) {
             $updates['s3_prefix'] = $this->get_site_s3_prefix();
         }
@@ -618,8 +593,7 @@ class Enhanced_S3_Media_Upload {
             'queue_url' => $this->sqs_queue_url,
             'cloudfront_domain' => $this->cloudfront_domain,
             'cloudfront_distribution_id' => $this->cloudfront_distribution_id,
-            'resource' => $resource,
-            'steps' => $steps,
+            'cloudfront_deploying' => $cloudfront_deploying,
             'message' => 'AWS resource setup completed successfully'
         );
     }
@@ -1621,6 +1595,7 @@ class Enhanced_S3_Media_Upload {
                     <p>
                         <a href="#" class="toggle-iam-policy" data-target="#iam-permissions"><?php esc_html_e('Show/Hide IAM Policy', 'enhanced-s3'); ?></a>
                     </p>
+                    <p class="description"><?php esc_html_e('Attach this policy to the IAM user or group whose access keys you entered. Saving access keys does not grant AWS permissions. It allows access only to FeatherLift buckets named featherlift-*.', 'enhanced-s3'); ?></p>
                     <div id="iam-permissions" style="display:none;">
                         <pre><?php
 echo esc_html(wp_json_encode(array(
@@ -1630,13 +1605,14 @@ echo esc_html(wp_json_encode(array(
             'Effect' => 'Allow',
             'Action' => array(
                 's3:CreateBucket', 's3:PutBucketPolicy', 's3:PutBucketPublicAccessBlock',
-                's3:PutBucketCORS', 's3:GetBucketLocation', 's3:PutObject',
-                's3:GetObject', 's3:DeleteObject', 's3:ListBucket'
+                's3:PutBucketCORS', 's3:GetBucketLocation', 's3:ListBucket'
             ),
-            'Resource' => array(
-                'arn:aws:s3:::' . $this->generate_bucket_name(),
-                'arn:aws:s3:::' . $this->generate_bucket_name() . '/*'
-            )
+            'Resource' => 'arn:aws:s3:::featherlift-*'
+        ),
+        array(
+            'Effect' => 'Allow',
+            'Action' => array('s3:PutObject', 's3:GetObject', 's3:DeleteObject'),
+            'Resource' => 'arn:aws:s3:::featherlift-*/*'
         ),
         array(
             'Effect' => 'Allow',
@@ -1745,13 +1721,8 @@ echo esc_html(wp_json_encode(array(
             <div class="aws-setup-section">
                 <h3><?php esc_html_e('AWS Resource Management', 'enhanced-s3'); ?></h3>
                 <?php $is_setup = $this->bucket_name === $this->generate_bucket_name() && !empty($this->sqs_queue_url) && !empty($this->cloudfront_domain); ?>
-                <p class="description"><?php esc_html_e('Each WordPress site gets a unique S3 bucket with public object reads enabled for its CloudFront distribution. The upload prefix is created automatically when the first file is stored.', 'enhanced-s3'); ?></p>
-                <p class="aws-resource-actions">
-                    <button type="button" class="button setup-aws-resource" data-resource="bucket" <?php disabled($this->bucket_name === $this->generate_bucket_name()); ?>><?php esc_html_e('Create S3 Bucket', 'enhanced-s3'); ?></button>
-                    <button type="button" class="button setup-aws-resource" data-resource="queue" <?php disabled(!empty($this->sqs_queue_url)); ?>><?php esc_html_e('Create SQS Queue', 'enhanced-s3'); ?></button>
-                    <button type="button" class="button setup-aws-resource" data-resource="cloudfront" <?php disabled(!empty($this->cloudfront_domain)); ?>><?php esc_html_e('Create CloudFront Distribution', 'enhanced-s3'); ?></button>
-                    <button type="button" id="setup-aws-resources" class="button button-primary setup-aws-resource" data-resource="all"><?php esc_html_e('Set Up All AWS Resources', 'enhanced-s3'); ?></button>
-                </p>
+                <p class="description"><?php esc_html_e('Set up this site’s S3 bucket, public media access, SQS queue, and CloudFront delivery together.', 'enhanced-s3'); ?></p>
+                <p><button type="button" id="setup-aws-resources" class="button button-primary"><?php echo $is_setup ? esc_html__('Verify AWS Setup', 'enhanced-s3') : esc_html__('Set Up AWS', 'enhanced-s3'); ?></button></p>
                 <?php if ($is_setup): ?>
                     <p class="aws-setup-status aws-setup-status--ready">&#10003; <?php esc_html_e('AWS resources are configured and ready.', 'enhanced-s3'); ?></p>
                     <p>
@@ -1772,9 +1743,10 @@ echo esc_html(wp_json_encode(array(
                         </div>
                     </div>
                 <?php else: ?>
-                    <p><?php esc_html_e('Your AWS credentials are saved. Create the required resources above.', 'enhanced-s3'); ?></p>
+                    <p><?php esc_html_e('Your saved AWS credentials will be checked as each resource is configured.', 'enhanced-s3'); ?></p>
                 <?php endif; ?>
-                <div class="aws-test-block">
+                <details class="aws-test-block">
+                    <summary><?php esc_html_e('Connection diagnostics', 'enhanced-s3'); ?></summary>
                     <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
                     <?php if (!empty($this->bucket_name) && $this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
                         <button type="button" id="test-storage-cdn-setup" class="button button-primary"><?php esc_html_e('Test S3 & CloudFront Setup', 'enhanced-s3'); ?></button>
@@ -1786,7 +1758,7 @@ echo esc_html(wp_json_encode(array(
                     <?php if (!empty($this->sqs_queue_url)) : ?>
                         <button type="button" id="test-sqs-connection" class="button button-secondary"><?php esc_html_e('Test SQS Connection', 'enhanced-s3'); ?></button>
                     <?php endif; ?>
-                </div>
+                </details>
                 <div id="setup-status"></div>
                 <div id="connection-result"></div>
             </div>
@@ -2465,8 +2437,7 @@ echo esc_html(wp_json_encode(array(
         }
         
         try {
-            $resource = isset($_POST['resource']) ? sanitize_key(wp_unslash($_POST['resource'])) : 'all';
-            $result = $this->provision_aws_stack($resource);
+            $result = $this->provision_aws_stack();
             wp_send_json_success($result);
         } catch (Exception $e) {
             wp_send_json_error($e->getMessage());

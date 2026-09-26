@@ -142,7 +142,7 @@ class Enhanced_S3_AWS_SDK {
      */
     public function create_sqs_queue($queue_name) {
         try {
-            $queue_url = $this->make_sqs_request('CreateQueue', array(
+            $response = $this->make_sqs_request('CreateQueue', array(
                 'QueueName' => $queue_name,
                 'Attribute.1.Name' => 'VisibilityTimeout',
                 'Attribute.1.Value' => '300',
@@ -151,6 +151,14 @@ class Enhanced_S3_AWS_SDK {
                 'Attribute.3.Name' => 'ReceiveMessageWaitTimeSeconds',
                 'Attribute.3.Value' => '20'
             ));
+
+            $queue_url = $response['CreateQueueResult']['QueueUrl']
+                ?? $response['CreateQueueResponse']['CreateQueueResult']['QueueUrl']
+                ?? $response['QueueUrl']
+                ?? '';
+            if (!is_string($queue_url) || $queue_url === '') {
+                throw new Exception('SQS CreateQueue succeeded but returned no queue URL.');
+            }
             
             return array(
                 'success' => true,
@@ -163,6 +171,21 @@ class Enhanced_S3_AWS_SDK {
                 'success' => false,
                 'error' => $e->getMessage()
             );
+        }
+    }
+
+    public function validate_sqs_queue($queue_url) {
+        try {
+            if (!is_string($queue_url) || $queue_url === '') {
+                throw new Exception('SQS queue URL is empty.');
+            }
+            $this->make_sqs_request('GetQueueAttributes', array(
+                'QueueUrl' => $queue_url,
+                'AttributeName.1' => 'QueueArn'
+            ));
+            return array('success' => true);
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
         }
     }
     
@@ -624,7 +647,11 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         $params['Action'] = $action;
         $params['Version'] = '2012-11-05';
         
-        $query_string = http_build_query($params);
+        $query_parts = array();
+        foreach ($params as $name => $value) {
+            $query_parts[] = rawurlencode((string) $name) . '=' . rawurlencode((string) $value);
+        }
+        $query_string = implode('&', $query_parts);
         
         // Create canonical request
         $canonical_headers = "host:" . $host . "\n";
