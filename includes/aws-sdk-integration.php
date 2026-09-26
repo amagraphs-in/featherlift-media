@@ -14,6 +14,17 @@ class Enhanced_S3_AWS_SDK {
         $this->secret_key = $secret_key;
         $this->region = $region;
     }
+
+    public function validate_credentials() {
+        try {
+            $identity = $this->make_sts_request('GetCallerIdentity', array(
+                'Version' => '2011-06-15'
+            ));
+            return array('success' => true, 'account' => $identity['Account'] ?? '');
+        } catch (Exception $e) {
+            return array('success' => false, 'error' => $e->getMessage());
+        }
+    }
     
     /**
      * Create S3 bucket with proper configuration
@@ -51,8 +62,10 @@ class Enhanced_S3_AWS_SDK {
                     )
                 ));
                 
-                // Apply the policy
-                $this->make_s3_request('PUT', $bucket_name, '', array('policy' => ''), $policy, 'application/json');
+                $policy_result = $this->make_s3_request('PUT', $actual_bucket, '', array('policy' => ''), $policy, 'application/json');
+                if (empty($policy_result['success'])) {
+                    throw new Exception('Unable to apply the S3 bucket policy: ' . ($policy_result['error'] ?? 'unknown error'));
+                }
                 
                 // Configure bucket for static website hosting
                 $website_config = '<?xml version="1.0" encoding="UTF-8"?>
@@ -65,21 +78,25 @@ class Enhanced_S3_AWS_SDK {
                         </ErrorDocument>
                     </WebsiteConfiguration>';
                 
-                $this->make_s3_request('PUT', $actual_bucket, '', array('website' => ''), $website_config);
-                
-                // Set CORS configuration
-                $cors_config = '<?xml version="1.0" encoding="UTF-8"?>
-                    <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                        <CORSRule>
-                            <AllowedOrigin>*</AllowedOrigin>
-                            <AllowedMethod>GET</AllowedMethod>
-                            <AllowedMethod>HEAD</AllowedMethod>
-                            <AllowedHeader>*</AllowedHeader>
-                            <MaxAgeSeconds>3000</MaxAgeSeconds>
-                        </CORSRule>
-                    </CORSConfiguration>';
-                
-                $this->make_s3_request('PUT', $actual_bucket, '', array('cors' => ''), $cors_config);
+                $website_result = $this->make_s3_request('PUT', $actual_bucket, '', array('website' => ''), $website_config);
+                if (empty($website_result['success'])) {
+                    throw new Exception('Unable to configure S3 website hosting: ' . ($website_result['error'] ?? 'unknown error'));
+                }
+            }
+
+            $cors_config = '<?xml version="1.0" encoding="UTF-8"?>
+                <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <CORSRule>
+                        <AllowedOrigin>*</AllowedOrigin>
+                        <AllowedMethod>GET</AllowedMethod>
+                        <AllowedMethod>HEAD</AllowedMethod>
+                        <AllowedHeader>*</AllowedHeader>
+                        <MaxAgeSeconds>3000</MaxAgeSeconds>
+                    </CORSRule>
+                </CORSConfiguration>';
+            $cors_result = $this->make_s3_request('PUT', $actual_bucket, '', array('cors' => ''), $cors_config);
+            if (empty($cors_result['success'])) {
+                throw new Exception('Unable to configure S3 CORS: ' . ($cors_result['error'] ?? 'unknown error'));
             }
             
             return array(
@@ -622,6 +639,49 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         } else {
             throw new Exception('SQS API Error: HTTP ' . $status_code . ': ' . $response_body);
         }
+    }
+
+    private function make_sts_request($action, $params = array()) {
+        $host = 'sts.' . $this->region . '.amazonaws.com';
+        $endpoint = 'https://' . $host . '/';
+        $datetime = gmdate('Ymd\THis\Z');
+        $date = substr($datetime, 0, 8);
+        $params['Action'] = $action;
+        $query_string = http_build_query($params);
+        $payload_hash = hash('sha256', $query_string);
+        $canonical_headers = "content-type:application/x-www-form-urlencoded\n";
+        $canonical_headers .= "host:" . $host . "\n";
+        $canonical_headers .= "x-amz-date:" . $datetime . "\n";
+        $signed_headers = 'content-type;host;x-amz-date';
+        $canonical_request = "POST\n/\n\n" . $canonical_headers . "\n" . $signed_headers . "\n" . $payload_hash;
+        $credential_scope = $date . '/' . $this->region . '/sts/aws4_request';
+        $string_to_sign = "AWS4-HMAC-SHA256\n" . $datetime . "\n" . $credential_scope . "\n" . hash('sha256', $canonical_request);
+        $signature = $this->generate_signature_v4($date, $string_to_sign, 'sts');
+        $authorization = 'AWS4-HMAC-SHA256 Credential=' . $this->access_key . '/' . $credential_scope
+            . ', SignedHeaders=' . $signed_headers . ', Signature=' . $signature;
+        $response = wp_remote_post($endpoint, array(
+            'timeout' => 20,
+            'headers' => array(
+                'Content-Type' => 'application/x-www-form-urlencoded',
+                'Host' => $host,
+                'X-Amz-Date' => $datetime,
+                'Authorization' => $authorization
+            ),
+            'body' => $query_string
+        ));
+        if (is_wp_error($response)) {
+            throw new Exception($response->get_error_message());
+        }
+        $status_code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+        if ($status_code < 200 || $status_code >= 300) {
+            throw new Exception('AWS credential check failed: HTTP ' . $status_code . ': ' . $body);
+        }
+        $xml = simplexml_load_string($body);
+        if ($xml === false) {
+            throw new Exception('AWS credential check returned an invalid response.');
+        }
+        return $this->xml_to_array($xml);
     }
     
     /**

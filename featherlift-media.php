@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.11
+ * Version: 1.1.12
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.11';
+    private $version = '1.1.12';
     private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
@@ -139,7 +139,7 @@ class Enhanced_S3_Media_Upload {
         $this->secret_key = $this->get_option('secret_key', '');
         $this->region = $this->get_option('region', 'us-east-1');
         $this->bucket_name = $this->get_option('bucket_name', '');
-        $this->s3_prefix = $this->get_option('s3_prefix', 'wp-content/uploads/');
+        $this->s3_prefix = $this->get_option('s3_prefix', $this->get_site_s3_prefix());
         $this->use_cloudfront = $this->get_option('use_cloudfront', false);
         $this->serve_media_from_cdn = (bool) $this->get_option('serve_media_from_cdn', $this->use_cloudfront);
         $this->serve_static_assets_from_cdn = (bool) $this->get_option('serve_static_assets_from_cdn', false);
@@ -188,6 +188,15 @@ class Enhanced_S3_Media_Upload {
         }
 
         return $value;
+    }
+
+    private function get_site_s3_prefix() {
+        $site_name = sanitize_title(get_bloginfo('name'));
+        if ($site_name === '') {
+            $site_name = 'site-' . substr(md5(get_site_url()), 0, 8);
+        }
+
+        return 'sites/' . $site_name . '/';
     }
 
     private function get_runtime_options() {
@@ -515,6 +524,15 @@ class Enhanced_S3_Media_Upload {
             throw new Exception('Unknown AWS resource requested.');
         }
 
+        $credential_result = $this->aws_sdk->validate_credentials();
+        if (empty($credential_result['success'])) {
+            throw new Exception('AWS credential validation failed: ' . ($credential_result['error'] ?? 'unknown error'));
+        }
+
+        $steps = array(array(
+            'name' => 'AWS credentials',
+            'status' => 'complete'
+        ));
         $create_bucket = in_array($resource, array('all', 'bucket', 'cloudfront'), true);
         $create_queue = in_array($resource, array('all', 'queue'), true);
         $create_cloudfront = in_array($resource, array('all', 'cloudfront'), true);
@@ -536,6 +554,9 @@ class Enhanced_S3_Media_Upload {
             }
 
             $updates['bucket_name'] = $bucket_result['bucket_name'] ?? $bucket_name;
+            $steps[] = array('name' => 'S3 bucket, policy, website hosting, and CORS', 'status' => 'complete');
+        } elseif ($create_bucket) {
+            $steps[] = array('name' => 'S3 bucket', 'status' => 'already configured');
         }
 
         if ($create_queue && empty($this->sqs_queue_url)) {
@@ -553,6 +574,9 @@ class Enhanced_S3_Media_Upload {
                 throw new Exception('Unable to determine SQS queue URL.');
             }
             $updates['sqs_queue_url'] = $queue_url;
+            $steps[] = array('name' => 'SQS queue', 'status' => 'complete');
+        } elseif ($create_queue) {
+            $steps[] = array('name' => 'SQS queue', 'status' => 'already configured');
         }
 
         $effective_bucket_name = $updates['bucket_name'] ?? $bucket_name;
@@ -570,10 +594,16 @@ class Enhanced_S3_Media_Upload {
             $updates['cloudfront_distribution_id'] = $cloudfront_result['distribution_id'] ?? '';
             $updates['use_cloudfront'] = '1';
             $updates['serve_media_from_cdn'] = '1';
+            $steps[] = array('name' => 'CloudFront distribution', 'status' => 'created; deployment is in progress');
+        } elseif ($create_cloudfront) {
+            $steps[] = array('name' => 'CloudFront distribution', 'status' => 'already configured');
         }
 
-        if (($resource === 'all' || $resource === 'bucket') && empty($this->options['s3_prefix'])) {
-            $updates['s3_prefix'] = 'wp-content/uploads/';
+        $current_prefix = trim($this->options['s3_prefix'] ?? '');
+        if (($resource === 'all' || $resource === 'bucket')
+            && !$this->has_existing_s3_files()
+            && ($current_prefix === '' || $current_prefix === 'wp-content/uploads/')) {
+            $updates['s3_prefix'] = $this->get_site_s3_prefix();
         }
 
         if (!empty($updates)) {
@@ -586,6 +616,7 @@ class Enhanced_S3_Media_Upload {
             'cloudfront_domain' => $this->cloudfront_domain,
             'cloudfront_distribution_id' => $this->cloudfront_distribution_id,
             'resource' => $resource,
+            'steps' => $steps,
             'message' => 'AWS resource setup completed successfully'
         );
     }
@@ -4145,19 +4176,8 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function bucket_name_field() {
-        $value = $this->get_option('bucket_name', $this->required_bucket_name);
-        $is_configured = !empty($value);
-        
-        if ($is_configured) {
-            // Bucket already configured - show as disabled
-            echo '<input type="text" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($value) . '" class="regular-text" disabled>';
-            echo '<input type="hidden" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($value) . '">';
-            echo '<p class="description" style="color: #d63638;">Bucket name is locked after creation to prevent breaking URLs.</p>';
-        } else {
-            // Not configured yet - allow custom input
-            echo '<input type="text" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($this->required_bucket_name) . '" class="regular-text" readonly>';
-            echo '<p class="description">Required: FeatherLift creates new buckets only as <code>ama-public-na</code>. Save this value before setup.</p>';
-        }
+        echo '<input type="text" name="enhanced_s3_settings[bucket_name]" value="' . esc_attr($this->required_bucket_name) . '" class="regular-text" readonly>';
+        echo '<p class="description">Shared parent bucket. Your site files are stored beneath the Upload prefix below, for example <code>ama-public-na/sites/your-site-name/</code>.</p>';
     }
 
     public function bucket_autoname_strategy_field() {
@@ -4193,9 +4213,9 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function s3_prefix_field() {
-        $value = trim($this->get_option('s3_prefix', 'wp-content/uploads/'));
-        echo '<input type="text" name="enhanced_s3_settings[s3_prefix]" value="' . esc_attr($value) . '" class="regular-text" placeholder="wp-content/uploads/">';
-        echo '<p class="description">Folder prefix inside your bucket. Defaults to <code>wp-content/uploads/</code>.</p>';
+        $value = trim($this->get_option('s3_prefix', $this->get_site_s3_prefix()));
+        echo '<input type="text" name="enhanced_s3_settings[s3_prefix]" value="' . esc_attr($value) . '" class="regular-text" placeholder="' . esc_attr($this->get_site_s3_prefix()) . '">';
+        echo '<p class="description">Folder prefix inside <code>ama-public-na</code>. New sites default to <code>' . esc_html($this->get_site_s3_prefix()) . '</code>; use this to keep every site in its own path. Do not change it after files are offloaded.</p>';
     }
 
     public function cloudfront_domain_field() {
@@ -5054,7 +5074,7 @@ file_put_contents($temp_file, $test_content);
             
             // Reset these
             'bucket_name' => '',
-            's3_prefix' => 'wp-content/uploads/',
+            's3_prefix' => $this->get_site_s3_prefix(),
             'use_cloudfront' => '',
             'serve_media_from_cdn' => '',
             'serve_static_assets_from_cdn' => '',

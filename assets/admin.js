@@ -366,7 +366,7 @@
             var originalText = $button.text();
             
             $button.prop('disabled', true).text('Setting up...');
-            $status.html('<div class="notice notice-info"><p>Setting up AWS resource...</p></div>');
+            $status.html('<div class="notice notice-info"><p>Checking credentials and configuring AWS resources...</p></div>');
             
             $.ajax({
                 url: enhancedS3Ajax.ajaxurl,
@@ -378,16 +378,20 @@
                 },
                 success: function(response) {
                     if (response.success) {
+                        var steps = Array.isArray(response.data.steps) ? response.data.steps : [];
+                        var stepHtml = steps.map(function(step) {
+                            return '<li><strong>' + step.name + ':</strong> ' + step.status + '</li>';
+                        }).join('');
                         $status.html('<div class="notice notice-success"><p>AWS resource setup completed successfully.</p><ul>' +
+                            stepHtml +
                             '<li><strong>Bucket:</strong> ' + response.data.bucket_name + '</li>' +
                             '<li><strong>Queue:</strong> ' + response.data.queue_url + '</li>' +
                             (response.data.cloudfront_domain ? '<li><strong>CloudFront:</strong> ' + response.data.cloudfront_domain + '</li>' : '') +
                             '</ul></div>');
-                        
-                        // Reload the page to show updated config
-                        setTimeout(function() {
-                            location.reload();
-                        }, 2000);
+                        $button.prop('disabled', true).text('Configured');
+                        if (resource === 'all') {
+                            $('.setup-aws-resource').not('[data-resource="all"]').prop('disabled', true);
+                        }
                     } else {
                         $status.html('<div class="notice notice-error"><p>Error: ' + response.data + '</p></div>');
                     }
