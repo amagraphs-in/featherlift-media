@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.14
+ * Version: 1.1.15
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.14';
+    private $version = '1.1.15';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -118,6 +118,10 @@ class Enhanced_S3_Media_Upload {
     }
     
     private function init_aws_components() {
+        if (!$this->is_configured()) {
+            throw new Exception('AWS credentials are missing or could not be decrypted. Re-enter and save the AWS access key and secret key.');
+        }
+
         $includes_dir = plugin_dir_path(__FILE__) . 'includes/';
         
         if (file_exists($includes_dir . 'aws-sdk-integration.php')) {
@@ -3482,7 +3486,16 @@ file_put_contents($temp_file, $test_content);
      * Check if plugin is configured
      */
     private function is_configured() {
-        return !empty($this->access_key) && !empty($this->secret_key) && !empty($this->region);
+        $access_key_is_encrypted = strpos((string) $this->access_key, 'enc::') === 0
+            || strpos((string) $this->access_key, 'enc2::') === 0;
+        $secret_key_is_encrypted = strpos((string) $this->secret_key, 'enc::') === 0
+            || strpos((string) $this->secret_key, 'enc2::') === 0;
+
+        return !empty($this->access_key)
+            && !$access_key_is_encrypted
+            && !empty($this->secret_key)
+            && !$secret_key_is_encrypted
+            && !empty($this->region);
     }
     
     private function get_s3_endpoint($region) {
@@ -3544,13 +3557,18 @@ file_put_contents($temp_file, $test_content);
     }
 
     private function decrypt_sensitive_value($value) {
-        if ($value === '' || !function_exists('openssl_decrypt')) {
+        if ($value === '') {
             return $value;
         }
 
         $is_current_format = strpos($value, 'enc2::') === 0;
-        if (!$is_current_format && strpos($value, 'enc::') !== 0) {
+        $is_legacy_format = strpos($value, 'enc::') === 0;
+        if (!$is_current_format && !$is_legacy_format) {
             return $value;
+        }
+
+        if (!function_exists('openssl_decrypt')) {
+            return '';
         }
 
         $payload = base64_decode(substr($value, $is_current_format ? 6 : 5), true);

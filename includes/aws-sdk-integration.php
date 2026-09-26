@@ -10,6 +10,12 @@ class Enhanced_S3_AWS_SDK {
     private $region;
     
     public function __construct($access_key, $secret_key, $region = 'us-east-1') {
+        foreach (array($access_key, $secret_key) as $credential) {
+            if (strpos((string) $credential, 'enc::') === 0 || strpos((string) $credential, 'enc2::') === 0) {
+                throw new Exception('Encrypted AWS credentials must be decrypted before initializing the AWS client.');
+            }
+        }
+
         $this->access_key = $access_key;
         $this->secret_key = $secret_key;
         $this->region = $region;

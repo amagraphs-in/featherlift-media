@@ -31,6 +31,9 @@ FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that
 5. GitHub Actions (`.github/workflows/release.yml`) builds the distributable ZIP and publishes it as a GitHub Release.
 
 ## Release Notes
+### v1.1.15 — 2026-09-26
+- Prevent encrypted AWS credentials from being passed to AWS requests when decryption is unavailable, and report that credentials must be re-entered instead.
+
 ### v1.1.14 — 2026-09-26
 - Replace individual AWS resource actions with one AJAX setup/verification flow for the per-site S3 bucket, SQS queue, and CloudFront delivery.
 - Remove the failing standalone STS preflight; validate credentials through the requested AWS operations.
