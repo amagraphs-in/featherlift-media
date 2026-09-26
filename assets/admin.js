@@ -405,6 +405,9 @@
                         if (response.data.auto_upload_waiting_for_cloudfront) {
                             $notice.append($('<p class="notice notice-warning inline">').text('Automatic image processing is paused until CloudFront is deployed. Run setup again after its status is Deployed.'));
                         }
+                        if (response.data.auto_upload_enabled && !response.data.auto_alt_enabled) {
+                            $notice.append($('<p class="notice notice-warning inline">').text('AI alt generation is opt-in. Enable “Enable AI-powered alt tags” and configure an AI provider to generate alt text automatically for future images.'));
+                        }
                         $status.empty().append($notice);
                     } else {
                         var $errorNotice = $('<div class="notice notice-error"><p></p></div>');

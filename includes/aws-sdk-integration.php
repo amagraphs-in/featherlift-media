@@ -417,16 +417,8 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
             throw new Exception('AWS returned invalid CloudFront distribution details.');
         }
 
-        $namespaces = $xml->getNamespaces(true);
-        $namespace = $namespaces[''] ?? '';
-        if ($namespace !== '') {
-            $xml->registerXPathNamespace('cf', $namespace);
-            $status_nodes = $xml->xpath('/cf:Distribution/cf:Status');
-            $origin_nodes = $xml->xpath('/cf:Distribution/cf:DistributionConfig/cf:Origins/cf:Items/cf:member/cf:DomainName');
-        } else {
-            $status_nodes = $xml->xpath('/Distribution/Status');
-            $origin_nodes = $xml->xpath('/Distribution/DistributionConfig/Origins/Items/member/DomainName');
-        }
+        $status_nodes = $xml->xpath('//*[local-name()="Distribution"]/*[local-name()="Status"]');
+        $origin_nodes = $xml->xpath('//*[local-name()="DistributionConfig"]/*[local-name()="Origins"]/*[local-name()="Items"]/*[local-name()="member"]/*[local-name()="DomainName"]');
 
         $status = !empty($status_nodes) ? (string) $status_nodes[0] : '';
         $origin = !empty($origin_nodes) ? (string) $origin_nodes[0] : '';

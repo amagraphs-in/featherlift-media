@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.18
+ * Version: 1.1.19
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.18';
+    private $version = '1.1.19';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -83,6 +83,7 @@ class Enhanced_S3_Media_Upload {
     private $custom_ai_endpoint;
     private $intent_committed = false;
     private $ai_features_available = false;
+    private $auto_alt_generation_in_progress = array();
     
     // Database table names
     private $logs_table;
@@ -423,7 +424,18 @@ class Enhanced_S3_Media_Upload {
         if (!$this->auto_upload_new_files || !$this->is_configured()) {
             return $metadata;
         }
-        
+
+        if ($this->ai_alt_enabled && wp_attachment_is_image($attachment_id) && empty($this->auto_alt_generation_in_progress[$attachment_id])) {
+            $this->auto_alt_generation_in_progress[$attachment_id] = true;
+            $alt_result = $this->generate_ai_alt_text($attachment_id, false, array(
+                'source' => 'auto-upload',
+                'initiator' => get_current_user_id()
+            ));
+            if (empty($alt_result['success']) && empty($alt_result['skipped'])) {
+                error_log('FeatherLift Media: Automatic alt generation failed for attachment ' . $attachment_id . ': ' . ($alt_result['error'] ?? 'Unknown error'));
+            }
+        }
+
         // This ensures thumbnails are generated before S3 upload
         // The queue will process this after thumbnail generation is complete
         $this->auto_upload_new_attachment($attachment_id);
@@ -622,6 +634,7 @@ class Enhanced_S3_Media_Upload {
             'cloudfront_status' => $cloudfront_status,
             'auto_upload_enabled' => (bool) $this->auto_upload_new_files,
             'tinypng_ready' => $tinypng_ready,
+            'auto_alt_enabled' => (bool) $this->ai_alt_enabled,
             'auto_upload_waiting_for_cloudfront' => $tinypng_ready && $cloudfront_deploying,
             'message' => 'AWS resource setup completed successfully'
         );
@@ -882,7 +895,7 @@ class Enhanced_S3_Media_Upload {
     public function auto_upload_new_files_field() {
         $value = $this->get_option('auto_upload_new_files');
         echo '<input type="checkbox" name="enhanced_s3_settings[auto_upload_new_files]" value="1" ' . checked($value, true, false) . '>';
-        echo '<p class="description">Automatically process and deliver future image uploads. Set Up AWS enables this when a TinyPNG key is saved.</p>';
+        echo '<p class="description">Automatically optimize and deliver future image uploads. AI alt tags are also generated when Enable AI-powered alt tags is on. Set Up AWS enables image delivery when a TinyPNG key is saved.</p>';
     }
     public function auto_upload_new_attachment($attachment_id) {
 
@@ -2737,8 +2750,10 @@ file_put_contents($temp_file, $test_content);
             
             if (!is_wp_error($response)) {
                 $status_code = wp_remote_retrieve_response_code($response);
-                if ($status_code === 200 || $status_code === 404) {
-                    wp_send_json_success('CloudFront connection successful! Domain is accessible.');
+                if ($status_code === 200) {
+                    wp_send_json_success('CloudFront domain is reachable. Run Test S3 & CloudFront Setup to verify actual object delivery.');
+                } elseif ($status_code === 403 || $status_code === 404) {
+                    wp_send_json_success('CloudFront domain is reachable (HTTP ' . $status_code . '), but /test-file.txt is not a valid delivery test. Run Test S3 & CloudFront Setup to verify a real S3 object.');
                 } else {
                     wp_send_json_error('CloudFront returned HTTP status: ' . $status_code);
                 }
