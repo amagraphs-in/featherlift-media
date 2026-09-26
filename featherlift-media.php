@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.15
+ * Version: 1.1.16
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.15';
+    private $version = '1.1.16';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -1574,6 +1574,19 @@ class Enhanced_S3_Media_Upload {
 
         $aws_status = $aws_ready ? 'Enabled' : 'Disabled';
         $aws_detail = $aws_ready ? (!empty($this->bucket_name) && !empty($this->sqs_queue_url) ? 'Bucket + Queue connected' : 'Credentials saved') : 'Add AWS credentials to unlock';
+        $aws_credentials_unreadable = (
+            ($this->has_stored_secret('access_key') && !$this->has_usable_secret('access_key'))
+            || ($this->has_stored_secret('secret_key') && !$this->has_usable_secret('secret_key'))
+        );
+        if ($this->use_cloudfront && empty($this->cloudfront_domain)) {
+            $cloudfront_status = __('Selected - run Set Up AWS', 'enhanced-s3');
+        } elseif ($this->use_cloudfront) {
+            $cloudfront_status = $this->cloudfront_domain;
+        } elseif (!empty($this->cloudfront_domain)) {
+            $cloudfront_status = sprintf(__('Configured, delivery off: %s', 'enhanced-s3'), $this->cloudfront_domain);
+        } else {
+            $cloudfront_status = __('Disabled', 'enhanced-s3');
+        }
 
         $compression_status = $this->compress_images ? sprintf(__('Enabled via %s', 'enhanced-s3'), $compression_label) : __('Disabled', 'enhanced-s3');
         $resize_status = $this->auto_resize_images
@@ -1642,7 +1655,7 @@ echo esc_html(wp_json_encode(array(
                     <li><strong><?php esc_html_e('AWS Resources:', 'enhanced-s3'); ?></strong> <?php echo esc_html($aws_status); ?> <span class="current-config-hint"><?php echo esc_html($aws_detail); ?></span></li>
                     <li><strong><?php esc_html_e('S3 Bucket:', 'enhanced-s3'); ?></strong> <?php echo $aws_ready && $this->bucket_name ? esc_html($this->bucket_name) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
                     <li><strong><?php esc_html_e('SQS Queue:', 'enhanced-s3'); ?></strong> <?php echo $aws_ready && $this->sqs_queue_url ? esc_html(basename($this->sqs_queue_url)) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
-                    <li><strong><?php esc_html_e('CloudFront Domain:', 'enhanced-s3'); ?></strong> <?php echo ($this->use_cloudfront && $this->cloudfront_domain) ? esc_html($this->cloudfront_domain) : esc_html__('Disabled', 'enhanced-s3'); ?></li>
+                    <li><strong><?php esc_html_e('CloudFront Domain:', 'enhanced-s3'); ?></strong> <?php echo esc_html($cloudfront_status); ?></li>
                     <li><strong><?php esc_html_e('Compression Service:', 'enhanced-s3'); ?></strong> <?php echo esc_html($compression_status); ?></li>
                     <li><strong><?php esc_html_e('Auto Resize:', 'enhanced-s3'); ?></strong> <?php echo esc_html($resize_status); ?></li>
                 </ul>
@@ -1721,12 +1734,16 @@ echo esc_html(wp_json_encode(array(
                 <?php submit_button(); ?>
             </form>
             
-            <?php if ($aws_ready): ?>
             <div class="aws-setup-section">
                 <h3><?php esc_html_e('AWS Resource Management', 'enhanced-s3'); ?></h3>
                 <?php $is_setup = $this->bucket_name === $this->generate_bucket_name() && !empty($this->sqs_queue_url) && !empty($this->cloudfront_domain); ?>
                 <p class="description"><?php esc_html_e('Set up this site’s S3 bucket, public media access, SQS queue, and CloudFront delivery together.', 'enhanced-s3'); ?></p>
-                <p><button type="button" id="setup-aws-resources" class="button button-primary"><?php echo $is_setup ? esc_html__('Verify AWS Setup', 'enhanced-s3') : esc_html__('Set Up AWS', 'enhanced-s3'); ?></button></p>
+                <p><button type="button" id="setup-aws-resources" class="button button-primary" <?php disabled(!$aws_ready); ?>><?php echo $is_setup ? esc_html__('Verify AWS Setup', 'enhanced-s3') : esc_html__('Set Up AWS', 'enhanced-s3'); ?></button></p>
+                <?php if (!$aws_ready): ?>
+                    <p class="notice notice-error inline"><?php echo $aws_credentials_unreadable
+                        ? esc_html__('Saved AWS credentials cannot be decrypted. Enable PHP OpenSSL, then re-enter and save both AWS keys.', 'enhanced-s3')
+                        : esc_html__('Enter and save both AWS keys and a region above to enable one-click setup.', 'enhanced-s3'); ?></p>
+                <?php endif; ?>
                 <?php if ($is_setup): ?>
                     <p class="aws-setup-status aws-setup-status--ready">&#10003; <?php esc_html_e('AWS resources are configured and ready.', 'enhanced-s3'); ?></p>
                     <p>
@@ -1753,20 +1770,19 @@ echo esc_html(wp_json_encode(array(
                     <summary><?php esc_html_e('Connection diagnostics', 'enhanced-s3'); ?></summary>
                     <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
                     <?php if (!empty($this->bucket_name) && $this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
-                        <button type="button" id="test-storage-cdn-setup" class="button button-primary"><?php esc_html_e('Test S3 & CloudFront Setup', 'enhanced-s3'); ?></button>
+                        <button type="button" id="test-storage-cdn-setup" class="button button-primary" <?php disabled(!$aws_ready); ?>><?php esc_html_e('Test S3 & CloudFront Setup', 'enhanced-s3'); ?></button>
                     <?php endif; ?>
-                    <button type="button" id="test-s3-connection" class="button button-secondary"><?php esc_html_e('Test S3 Connection', 'enhanced-s3'); ?></button>
+                    <button type="button" id="test-s3-connection" class="button button-secondary" <?php disabled(!$aws_ready || empty($this->bucket_name)); ?>><?php esc_html_e('Test S3 Connection', 'enhanced-s3'); ?></button>
                     <?php if ($this->use_cloudfront && !empty($this->cloudfront_domain)) : ?>
-                        <button type="button" id="test-cloudfront-connection" class="button button-secondary"><?php esc_html_e('Test CloudFront Connection', 'enhanced-s3'); ?></button>
+                        <button type="button" id="test-cloudfront-connection" class="button button-secondary" <?php disabled(!$aws_ready); ?>><?php esc_html_e('Test CloudFront Connection', 'enhanced-s3'); ?></button>
                     <?php endif; ?>
                     <?php if (!empty($this->sqs_queue_url)) : ?>
-                        <button type="button" id="test-sqs-connection" class="button button-secondary"><?php esc_html_e('Test SQS Connection', 'enhanced-s3'); ?></button>
+                        <button type="button" id="test-sqs-connection" class="button button-secondary" <?php disabled(!$aws_ready); ?>><?php esc_html_e('Test SQS Connection', 'enhanced-s3'); ?></button>
                     <?php endif; ?>
                 </details>
                 <div id="setup-status"></div>
                 <div id="connection-result"></div>
             </div>
-            <?php endif; ?>
         </div>
         
         <script type="text/javascript">
@@ -3531,8 +3547,11 @@ file_put_contents($temp_file, $test_content);
 
     private function encrypt_sensitive_value($value) {
         $value = trim((string) $value);
-        if ($value === '' || !function_exists('openssl_encrypt')) {
-            return $value;
+        if ($value === '') {
+            return '';
+        }
+        if (!function_exists('openssl_encrypt')) {
+            return '';
         }
 
         try {
@@ -3547,12 +3566,12 @@ file_put_contents($temp_file, $test_content);
             $encrypted = openssl_encrypt($value, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
 
             if ($encrypted === false) {
-                return $value;
+                return '';
             }
 
             return 'enc2::' . base64_encode($iv . $encrypted);
         } catch (Exception $e) {
-            return $value;
+            return '';
         }
     }
 
