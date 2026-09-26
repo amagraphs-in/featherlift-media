@@ -4,7 +4,7 @@ FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that
 
 ## Key Capabilities
 - Toggleable media optimization (resize + compression) and offload/CDN workflows
-- Guided AWS provisioning for S3 buckets, SQS queues, and CloudFront distributions
+- Guided AWS provisioning for a unique, public-read S3 bucket per site, SQS queues, and CloudFront distributions
 - Background queue management with granular progress logging
 - Manual and bulk media controls inside the WordPress Media Library
 - Optional AI-generated alt tags with provider/model selection
@@ -31,9 +31,14 @@ FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that
 5. GitHub Actions (`.github/workflows/release.yml`) builds the distributable ZIP and publishes it as a GitHub Release.
 
 ## Release Notes
+### v1.1.13 — 2026-09-26
+- Generate a globally unique S3 bucket for each WordPress site and configure public object reads, CORS, and a CloudFront distribution targeting that site's bucket.
+- Create buckets in the selected AWS region, resume setup after partial failures, and report when AWS account-level public-access restrictions prevent public delivery.
+- Preserve existing offloaded media by blocking automatic bucket changes when attachments already reference S3 objects.
+
 ### v1.1.12 — 2026-09-26
 - Add in-place AJAX AWS setup with STS credential validation, ordered S3/SQS/CloudFront provisioning, step-by-step status, and actionable errors for failed bucket policy, website-hosting, or CORS configuration.
-- Store new site media beneath a site-specific `sites/<site-name>/` prefix inside the shared `ama-public-na` bucket, while leaving existing S3 keys unchanged.
+- Generate a site-specific upload prefix and migrate the legacy default only when no media has been offloaded.
 
 ### v1.1.11 — 2026-09-26
 - Enforce a single queued image delivery pipeline across automatic, single, bulk, manual, and retry uploads: TinyPNG compression, WebP conversion, S3 offload, verified CloudFront delivery, and reversible URL metadata.

@@ -31,72 +31,35 @@ class Enhanced_S3_AWS_SDK {
      */
     public function create_s3_bucket($bucket_name, $args = array()) {
         try {
-            $defaults = array(
-                'preserve_permissions' => false
+            $actual_bucket = trim($bucket_name);
+            $create_body = '';
+            if ($this->region !== 'us-east-1') {
+                $create_body = '<?xml version="1.0" encoding="UTF-8"?>'
+                    . '<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                    . '<LocationConstraint>' . esc_html($this->region) . '</LocationConstraint>'
+                    . '</CreateBucketConfiguration>';
+            }
+
+            $result = $this->make_s3_request(
+                'PUT',
+                $actual_bucket,
+                '',
+                array(),
+                $create_body,
+                $create_body === '' ? 'application/octet-stream' : 'application/xml',
+                $this->region
             );
-            $args = array_merge($defaults, $args);
-            // Extract the parent folder and actual bucket name
-            $path_parts = explode('/', $bucket_name);
-            $actual_bucket = array_pop($path_parts);
-            $parent_folder = implode('/', $path_parts);
-            
-            // Create bucket
-            $result = $this->make_s3_request('PUT', $actual_bucket, '');
             
             if (!$result['success']) {
-                return $result;
-            }
-            
-            if (empty($args['preserve_permissions'])) {
-                // Set bucket policy for public read access
-                $policy = json_encode(array(
-                    "Version" => "2012-10-17",
-                    "Statement" => array(
-                        array(
-                            "Sid" => "PublicReadGetObject",
-                            "Effect" => "Allow",
-                            "Principal" => "*",
-                            "Action" => "s3:GetObject",
-                            "Resource" => "arn:aws:s3:::{$bucket_name}/*"
-                        )
-                    )
-                ));
-                
-                $policy_result = $this->make_s3_request('PUT', $actual_bucket, '', array('policy' => ''), $policy, 'application/json');
-                if (empty($policy_result['success'])) {
-                    throw new Exception('Unable to apply the S3 bucket policy: ' . ($policy_result['error'] ?? 'unknown error'));
-                }
-                
-                // Configure bucket for static website hosting
-                $website_config = '<?xml version="1.0" encoding="UTF-8"?>
-                    <WebsiteConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                        <IndexDocument>
-                            <Suffix>index.html</Suffix>
-                        </IndexDocument>
-                        <ErrorDocument>
-                            <Key>error.html</Key>
-                        </ErrorDocument>
-                    </WebsiteConfiguration>';
-                
-                $website_result = $this->make_s3_request('PUT', $actual_bucket, '', array('website' => ''), $website_config);
-                if (empty($website_result['success'])) {
-                    throw new Exception('Unable to configure S3 website hosting: ' . ($website_result['error'] ?? 'unknown error'));
+                $existing_bucket = $this->make_s3_request('HEAD', $actual_bucket);
+                if (empty($existing_bucket['success'])) {
+                    return $result;
                 }
             }
 
-            $cors_config = '<?xml version="1.0" encoding="UTF-8"?>
-                <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                    <CORSRule>
-                        <AllowedOrigin>*</AllowedOrigin>
-                        <AllowedMethod>GET</AllowedMethod>
-                        <AllowedMethod>HEAD</AllowedMethod>
-                        <AllowedHeader>*</AllowedHeader>
-                        <MaxAgeSeconds>3000</MaxAgeSeconds>
-                    </CORSRule>
-                </CORSConfiguration>';
-            $cors_result = $this->make_s3_request('PUT', $actual_bucket, '', array('cors' => ''), $cors_config);
-            if (empty($cors_result['success'])) {
-                throw new Exception('Unable to configure S3 CORS: ' . ($cors_result['error'] ?? 'unknown error'));
+            $public_access_result = $this->configure_s3_public_access($actual_bucket);
+            if (empty($public_access_result['success'])) {
+                throw new Exception($public_access_result['error'] ?? 'Unable to configure public S3 access.');
             }
             
             return array(
@@ -111,6 +74,67 @@ class Enhanced_S3_AWS_SDK {
                 'error' => $e->getMessage()
             );
         }
+    }
+
+    public function configure_s3_cors($bucket_name) {
+        $cors_config = '<?xml version="1.0" encoding="UTF-8"?>
+            <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                <CORSRule>
+                    <AllowedOrigin>*</AllowedOrigin>
+                    <AllowedMethod>GET</AllowedMethod>
+                    <AllowedMethod>HEAD</AllowedMethod>
+                    <AllowedHeader>*</AllowedHeader>
+                    <MaxAgeSeconds>3000</MaxAgeSeconds>
+                </CORSRule>
+            </CORSConfiguration>';
+        $result = $this->make_s3_request('PUT', $bucket_name, '', array('cors' => ''), $cors_config);
+        if (empty($result['success'])) {
+            return array('success' => false, 'error' => $result['error'] ?? 'unknown error');
+        }
+
+        return array('success' => true);
+    }
+
+    public function configure_s3_public_access($bucket_name) {
+        $public_access_config = '<?xml version="1.0" encoding="UTF-8"?>'
+            . '<PublicAccessBlockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+            . '<BlockPublicAcls>false</BlockPublicAcls>'
+            . '<IgnorePublicAcls>false</IgnorePublicAcls>'
+            . '<BlockPublicPolicy>false</BlockPublicPolicy>'
+            . '<RestrictPublicBuckets>false</RestrictPublicBuckets>'
+            . '</PublicAccessBlockConfiguration>';
+        $block_result = $this->make_s3_request('PUT', $bucket_name, '', array('publicAccessBlock' => ''), $public_access_config, 'application/xml');
+        if (empty($block_result['success'])) {
+            return array(
+                'success' => false,
+                'error' => 'Unable to allow the bucket policy to serve public objects. Check s3:PutBucketPublicAccessBlock and AWS account-level Block Public Access settings. AWS returned: ' . ($block_result['error'] ?? 'unknown error')
+            );
+        }
+
+        $policy = wp_json_encode(array(
+            'Version' => '2012-10-17',
+            'Statement' => array(array(
+                'Sid' => 'PublicReadGetObject',
+                'Effect' => 'Allow',
+                'Principal' => '*',
+                'Action' => 's3:GetObject',
+                'Resource' => 'arn:aws:s3:::' . $bucket_name . '/*'
+            ))
+        ));
+        $policy_result = $this->make_s3_request('PUT', $bucket_name, '', array('policy' => ''), $policy, 'application/json');
+        if (empty($policy_result['success'])) {
+            return array(
+                'success' => false,
+                'error' => 'Unable to apply the public-read bucket policy. Check s3:PutBucketPolicy and account-level public access blocks. AWS returned: ' . ($policy_result['error'] ?? 'unknown error')
+            );
+        }
+
+        $cors_result = $this->configure_s3_cors($bucket_name);
+        if (empty($cors_result['success'])) {
+            return array('success' => false, 'error' => 'Unable to configure S3 CORS: ' . ($cors_result['error'] ?? 'unknown error'));
+        }
+
+        return array('success' => true);
     }
     
     /**
@@ -147,9 +171,10 @@ class Enhanced_S3_AWS_SDK {
      */
     public function create_cloudfront_distribution($bucket_name) {
         try {
-            
-            
-            $origin_domain = $bucket_name . '.s3.' . $this->region . '.amazonaws.com';
+            $bucket_region = $this->get_s3_bucket_region($bucket_name);
+            $origin_domain = $bucket_region === 'us-east-1'
+                ? $bucket_name . '.s3.amazonaws.com'
+                : $bucket_name . '.s3.' . $bucket_region . '.amazonaws.com';
 error_log("Creating CloudFront for origin: " . $origin_domain);
             
             $distribution_config = array(
@@ -329,6 +354,15 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         }
     }
 
+    public function get_s3_bucket_region($bucket_name) {
+        $result = $this->make_s3_request('HEAD', $bucket_name);
+        if (empty($result['success'])) {
+            throw new Exception('Unable to determine the S3 bucket region: ' . ($result['error'] ?? 'unknown error'));
+        }
+
+        return $result['region'] ?? $this->region;
+    }
+
     public function delete_s3_bucket($bucket_name) {
         try {
             $result = $this->make_s3_request('DELETE', $bucket_name);
@@ -469,8 +503,11 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
     /**
      * Make S3 API request
      */
-    private function make_s3_request($method, $bucket, $key = '', $query_params = array(), $body = '', $content_type = 'application/octet-stream') {
-        $host = $bucket . '.s3.' . $this->region . '.amazonaws.com';
+    private function make_s3_request($method, $bucket, $key = '', $query_params = array(), $body = '', $content_type = 'application/octet-stream', $request_region = null) {
+        $request_region = $request_region ?: $this->region;
+        $host = $request_region === 'us-east-1'
+            ? $bucket . '.s3.amazonaws.com'
+            : $bucket . '.s3.' . $request_region . '.amazonaws.com';
         $endpoint = 'https://' . $host . '/' . $key;
         
         if (!empty($query_params)) {
@@ -505,14 +542,14 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         $canonical_request .= $content_sha256;
         
         // Create string to sign
-        $credential_scope = $date . "/" . $this->region . "/s3/aws4_request";
+        $credential_scope = $date . "/" . $request_region . "/s3/aws4_request";
         $string_to_sign = "AWS4-HMAC-SHA256\n";
         $string_to_sign .= $datetime . "\n";
         $string_to_sign .= $credential_scope . "\n";
         $string_to_sign .= hash('sha256', $canonical_request);
         
         // Calculate signature
-        $signature = $this->generate_signature_v4($date, $string_to_sign, 's3');
+        $signature = $this->generate_signature_v4($date, $string_to_sign, 's3', $request_region);
         
         // Create authorization header
         $authorization = "AWS4-HMAC-SHA256 Credential=" . $this->access_key . "/" . $credential_scope;
@@ -535,6 +572,7 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         $args = array(
             'method' => $method,
             'timeout' => 60,
+            'redirection' => 0,
             'headers' => $headers,
             'body' => $body
         );
@@ -550,12 +588,18 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         
         $status_code = wp_remote_retrieve_response_code($response);
         $response_body = wp_remote_retrieve_body($response);
+
+        $bucket_region = wp_remote_retrieve_header($response, 'x-amz-bucket-region');
+        if ($status_code === 301 && !empty($bucket_region) && $bucket_region !== $request_region) {
+            return $this->make_s3_request($method, $bucket, $key, $query_params, $body, $content_type, $bucket_region);
+        }
         
         if ($status_code >= 200 && $status_code < 300) {
             return array(
                 'success' => true,
                 'body' => $response_body,
-                'status_code' => $status_code
+                'status_code' => $status_code,
+                'region' => $request_region
             );
         } else {
             return array(
@@ -720,14 +764,14 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         $canonical_request .= $content_sha256;
 
         // String to sign
-        $credential_scope = $date . "/" . $this->region . "/cloudfront/aws4_request";
+        $credential_scope = $date . "/us-east-1/cloudfront/aws4_request";
         $string_to_sign = "AWS4-HMAC-SHA256\n";
         $string_to_sign .= $datetime . "\n";
         $string_to_sign .= $credential_scope . "\n";
         $string_to_sign .= hash('sha256', $canonical_request);
 
         // Generate signature
-        $signature = $this->generate_signature_v4($date, $string_to_sign, 'cloudfront');
+        $signature = $this->generate_signature_v4($date, $string_to_sign, 'cloudfront', 'us-east-1');
 
         // Authorization header
         $authorization = "AWS4-HMAC-SHA256 Credential=" . $this->access_key . "/" . $credential_scope;
@@ -777,34 +821,39 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
     }
 
 private function build_distribution_xml($config) {
+    $origin = $config['Origins']['Items'][0];
+    $behavior = $config['DefaultCacheBehavior'];
     $xml = '<?xml version="1.0" encoding="UTF-8"?>';
     $xml .= '<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">';
-    $xml .= '<CallerReference>' . $config['CallerReference'] . '</CallerReference>';
-    $xml .= '<Comment>' . $config['Comment'] . '</Comment>';
-    $xml .= '<Enabled>' . ($config['Enabled'] ? 'true' : 'false') . '</Enabled>';
-    
-    $xml .= '<Origins>';
-    $xml .= '<Quantity>1</Quantity>';
-    $xml .= '<Items>';
-    $xml .= '<member>';
-    $xml .= '<Id>' . $config['Origins']['Items'][0]['Id'] . '</Id>';
-    $xml .= '<DomainName>' . $config['Origins']['Items'][0]['DomainName'] . '</DomainName>';
+    $xml .= '<CallerReference>' . htmlspecialchars($config['CallerReference'], ENT_XML1, 'UTF-8') . '</CallerReference>';
+    $xml .= '<Aliases><Quantity>0</Quantity></Aliases>';
+    $xml .= '<DefaultRootObject></DefaultRootObject>';
+    $xml .= '<Origins><Quantity>1</Quantity><Items><member>';
+    $xml .= '<Id>' . htmlspecialchars($origin['Id'], ENT_XML1, 'UTF-8') . '</Id>';
+    $xml .= '<DomainName>' . htmlspecialchars($origin['DomainName'], ENT_XML1, 'UTF-8') . '</DomainName>';
+    $xml .= '<OriginPath></OriginPath><CustomHeaders><Quantity>0</Quantity></CustomHeaders>';
     $xml .= '<S3OriginConfig><OriginAccessIdentity></OriginAccessIdentity></S3OriginConfig>';
-    $xml .= '</member>';
-    $xml .= '</Items>';
-    $xml .= '</Origins>';
-    
+    $xml .= '<ConnectionAttempts>3</ConnectionAttempts><ConnectionTimeout>10</ConnectionTimeout>';
+    $xml .= '</member></Items></Origins><OriginGroups><Quantity>0</Quantity></OriginGroups>';
     $xml .= '<DefaultCacheBehavior>';
-    $xml .= '<TargetOriginId>' . $config['DefaultCacheBehavior']['TargetOriginId'] . '</TargetOriginId>';
-    $xml .= '<ViewerProtocolPolicy>' . $config['DefaultCacheBehavior']['ViewerProtocolPolicy'] . '</ViewerProtocolPolicy>';
-    $xml .= '<MinTTL>0</MinTTL>';
-    $xml .= '<DefaultTTL>86400</DefaultTTL>';
-    $xml .= '<MaxTTL>31536000</MaxTTL>';
-    $xml .= '<ForwardedValues><QueryString>false</QueryString><Cookies><Forward>none</Forward></Cookies></ForwardedValues>';
+    $xml .= '<TargetOriginId>' . htmlspecialchars($behavior['TargetOriginId'], ENT_XML1, 'UTF-8') . '</TargetOriginId>';
     $xml .= '<TrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></TrustedSigners>';
-    $xml .= '</DefaultCacheBehavior>';
+    $xml .= '<TrustedKeyGroups><Enabled>false</Enabled><Quantity>0</Quantity></TrustedKeyGroups>';
+    $xml .= '<ViewerProtocolPolicy>' . htmlspecialchars($behavior['ViewerProtocolPolicy'], ENT_XML1, 'UTF-8') . '</ViewerProtocolPolicy>';
+    $xml .= '<AllowedMethods><Quantity>2</Quantity><Items><Method>GET</Method><Method>HEAD</Method></Items><CachedMethods><Quantity>2</Quantity><Items><Method>GET</Method><Method>HEAD</Method></Items></CachedMethods></AllowedMethods>';
+    $xml .= '<SmoothStreaming>false</SmoothStreaming><Compress>true</Compress>';
+    $xml .= '<ForwardedValues><QueryString>false</QueryString><Cookies><Forward>none</Forward></Cookies><Headers><Quantity>0</Quantity></Headers><QueryStringCacheKeys><Quantity>0</Quantity></QueryStringCacheKeys></ForwardedValues>';
+    $xml .= '<MinTTL>0</MinTTL><DefaultTTL>86400</DefaultTTL><MaxTTL>31536000</MaxTTL>';
+    $xml .= '</DefaultCacheBehavior><CacheBehaviors><Quantity>0</Quantity></CacheBehaviors>';
+    $xml .= '<CustomErrorResponses><Quantity>0</Quantity></CustomErrorResponses>';
+    $xml .= '<Comment>' . htmlspecialchars($config['Comment'], ENT_XML1, 'UTF-8') . '</Comment>';
+    $xml .= '<Logging><Enabled>false</Enabled><IncludeCookies>false</IncludeCookies><Bucket></Bucket><Prefix></Prefix></Logging>';
+    $xml .= '<PriceClass>PriceClass_100</PriceClass><Enabled>' . ($config['Enabled'] ? 'true' : 'false') . '</Enabled>';
+    $xml .= '<ViewerCertificate><CloudFrontDefaultCertificate>true</CloudFrontDefaultCertificate></ViewerCertificate>';
+    $xml .= '<Restrictions><GeoRestriction><RestrictionType>none</RestrictionType><Quantity>0</Quantity></GeoRestriction></Restrictions>';
+    $xml .= '<HttpVersion>http2</HttpVersion><IsIPV6Enabled>true</IsIPV6Enabled>';
     $xml .= '</DistributionConfig>';
-    
+
     return $xml;
 }
 
@@ -820,9 +869,10 @@ private function parse_cloudfront_xml($xml) {
     /**
      * Generate AWS Signature Version 4
      */
-    private function generate_signature_v4($date, $string_to_sign, $service) {
+    private function generate_signature_v4($date, $string_to_sign, $service, $region = null) {
+        $region = $region ?: $this->region;
         $date_key = hash_hmac('sha256', $date, 'AWS4' . $this->secret_key, true);
-        $region_key = hash_hmac('sha256', $this->region, $date_key, true);
+        $region_key = hash_hmac('sha256', $region, $date_key, true);
         $service_key = hash_hmac('sha256', $service, $region_key, true);
         $signing_key = hash_hmac('sha256', 'aws4_request', $service_key, true);
         
