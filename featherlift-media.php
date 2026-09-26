@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.17
+ * Version: 1.1.18
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.17';
+    private $version = '1.1.18';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -566,6 +566,7 @@ class Enhanced_S3_Media_Upload {
 
         $effective_cloudfront_domain = $updates['cloudfront_domain'] ?? $this->cloudfront_domain;
         $cloudfront_deploying = false;
+        $cloudfront_status = 'Deployed';
         if (empty($effective_cloudfront_domain)) {
             $cloudfront_result = $this->aws_sdk->create_cloudfront_distribution($bucket_name);
             if (empty($cloudfront_result['success']) || empty($cloudfront_result['domain'])) {
@@ -576,11 +577,18 @@ class Enhanced_S3_Media_Upload {
             $updates['cloudfront_distribution_id'] = $cloudfront_result['distribution_id'] ?? '';
             $updates['use_cloudfront'] = '1';
             $updates['serve_media_from_cdn'] = '1';
-            $cloudfront_deploying = true;
+            $cloudfront_status = $cloudfront_result['status'] ?? 'InProgress';
         } else {
             $updates['use_cloudfront'] = '1';
             $updates['serve_media_from_cdn'] = '1';
+            if (!empty($this->cloudfront_distribution_id)) {
+                $distribution_check = $this->aws_sdk->validate_cloudfront_origin($this->cloudfront_distribution_id, $bucket_name);
+                $cloudfront_status = $distribution_check['status'];
+            } else {
+                $cloudfront_status = 'Unverified';
+            }
         }
+        $cloudfront_deploying = $cloudfront_status !== 'Deployed';
 
         $current_prefix = trim($this->options['s3_prefix'] ?? '');
         if (!$this->has_existing_s3_files()
@@ -589,7 +597,7 @@ class Enhanced_S3_Media_Upload {
         }
 
         $tinypng_ready = !empty($this->tinypng_api_key);
-        if ($tinypng_ready) {
+        if ($tinypng_ready && !$cloudfront_deploying) {
             $updates['auto_upload_new_files'] = '1';
             $updates['auto_upload_file_types'] = array('image');
             $updates['optimize_media'] = '1';
@@ -597,6 +605,8 @@ class Enhanced_S3_Media_Upload {
             $updates['compress_images'] = '1';
             $updates['compression_service'] = 'tinypng';
             $updates['convert_to_webp'] = '1';
+        } else {
+            $updates['auto_upload_new_files'] = '';
         }
 
         if (!empty($updates)) {
@@ -609,8 +619,10 @@ class Enhanced_S3_Media_Upload {
             'cloudfront_domain' => $this->cloudfront_domain,
             'cloudfront_distribution_id' => $this->cloudfront_distribution_id,
             'cloudfront_deploying' => $cloudfront_deploying,
+            'cloudfront_status' => $cloudfront_status,
             'auto_upload_enabled' => (bool) $this->auto_upload_new_files,
             'tinypng_ready' => $tinypng_ready,
+            'auto_upload_waiting_for_cloudfront' => $tinypng_ready && $cloudfront_deploying,
             'message' => 'AWS resource setup completed successfully'
         );
     }
@@ -1547,10 +1559,10 @@ class Enhanced_S3_Media_Upload {
             }
             if ($row['can_upload'] && !$row['is_offloaded']) {
                 $html .= '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Process & Upload', 'enhanced-s3') . '</button>';
-            } elseif ($this->offload_media && !$this->is_configured()) {
-                $html .= '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
             } elseif ($row['is_offloaded']) {
                 $html .= '<span class="featherlite-hint">' . esc_html__('Already on S3', 'enhanced-s3') . '</span>';
+            } elseif ($this->offload_media && !$this->is_configured()) {
+                $html .= '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
             }
             $html .= '<div class="featherlite-row-status" id="opt-status-' . esc_attr($row['id']) . '"></div>';
             $html .= '<div class="featherlite-row-status" id="status-' . esc_attr($row['id']) . '"></div>';

@@ -379,7 +379,7 @@
                 },
                 success: function(response) {
                     if (response.success) {
-                        setupComplete = true;
+                        setupComplete = !response.data.cloudfront_deploying;
                         var $notice = $('<div class="notice notice-success"><p></p><ul></ul></div>');
                         $notice.find('p').text(response.data.message || 'AWS setup is complete.');
                         [
@@ -392,12 +392,18 @@
                             }
                         });
                         if (response.data.cloudfront_deploying) {
-                            $notice.append($('<p>').text('CloudFront is deploying. CDN delivery will become available after AWS finishes deployment.'));
+                            var deploymentMessage = response.data.cloudfront_status === 'Unverified'
+                                ? 'CloudFront could not be verified. Enter its distribution ID in External Storage & CDN, then run setup again.'
+                                : 'CloudFront status: ' + (response.data.cloudfront_status || 'InProgress') + '. Run setup again after AWS reports Deployed.';
+                            $notice.append($('<p>').text(deploymentMessage));
                         }
                         if (!response.data.auto_upload_enabled && !response.data.tinypng_ready) {
                             $notice.append($('<p class="notice notice-warning inline">').text('AWS resources are ready, but automatic image processing needs a TinyPNG API key. Add it under Optimize & Resize, then run Set Up AWS again to enable TinyPNG, WebP, S3, and CloudFront processing for new images.'));
                         } else if (!response.data.auto_upload_enabled) {
                             $notice.append($('<p class="notice notice-warning inline">').text('Automatic processing is off. Enable “Automatically process future uploads” in Automation & Workflow.'));
+                        }
+                        if (response.data.auto_upload_waiting_for_cloudfront) {
+                            $notice.append($('<p class="notice notice-warning inline">').text('Automatic image processing is paused until CloudFront is deployed. Run setup again after its status is Deployed.'));
                         }
                         $status.empty().append($notice);
                     } else {
@@ -412,7 +418,7 @@
                     $status.empty().append($errorNotice);
                 },
                 complete: function() {
-                    $button.prop('disabled', setupComplete).text(setupComplete ? 'AWS Setup Complete' : originalText);
+                    $button.prop('disabled', setupComplete).text(setupComplete ? 'AWS Setup Complete' : 'Verify AWS Setup Again');
                 }
             });
         },

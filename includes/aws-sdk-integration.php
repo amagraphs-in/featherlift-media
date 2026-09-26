@@ -392,6 +392,59 @@ error_log("Creating CloudFront for origin: " . $origin_domain);
         return $result['region'] ?? $this->region;
     }
 
+    public function get_cloudfront_distribution_status($distribution_id) {
+        if (empty($distribution_id)) {
+            throw new Exception('CloudFront distribution ID is missing.');
+        }
+
+        $result = $this->make_cloudfront_request('GET', 'distribution/' . rawurlencode($distribution_id));
+        $status = $result['Distribution']['Status'] ?? '';
+        if (!is_string($status) || $status === '') {
+            throw new Exception('AWS returned no status for CloudFront distribution ' . $distribution_id . '.');
+        }
+
+        return $status;
+    }
+
+    public function validate_cloudfront_origin($distribution_id, $bucket_name) {
+        if (empty($distribution_id) || empty($bucket_name)) {
+            throw new Exception('CloudFront distribution ID or S3 bucket name is missing.');
+        }
+
+        $result = $this->make_cloudfront_request('GET', 'distribution/' . rawurlencode($distribution_id));
+        $xml = simplexml_load_string($result['raw_body'] ?? '');
+        if ($xml === false) {
+            throw new Exception('AWS returned invalid CloudFront distribution details.');
+        }
+
+        $namespaces = $xml->getNamespaces(true);
+        $namespace = $namespaces[''] ?? '';
+        if ($namespace !== '') {
+            $xml->registerXPathNamespace('cf', $namespace);
+            $status_nodes = $xml->xpath('/cf:Distribution/cf:Status');
+            $origin_nodes = $xml->xpath('/cf:Distribution/cf:DistributionConfig/cf:Origins/cf:Items/cf:member/cf:DomainName');
+        } else {
+            $status_nodes = $xml->xpath('/Distribution/Status');
+            $origin_nodes = $xml->xpath('/Distribution/DistributionConfig/Origins/Items/member/DomainName');
+        }
+
+        $status = !empty($status_nodes) ? (string) $status_nodes[0] : '';
+        $origin = !empty($origin_nodes) ? (string) $origin_nodes[0] : '';
+        if ($status === '' || $origin === '') {
+            throw new Exception('CloudFront response did not include a status and S3 origin.');
+        }
+
+        $bucket_region = $this->get_s3_bucket_region($bucket_name);
+        $expected_origin = $bucket_region === 'us-east-1'
+            ? $bucket_name . '.s3.amazonaws.com'
+            : $bucket_name . '.s3.' . $bucket_region . '.amazonaws.com';
+        if (strcasecmp($origin, $expected_origin) !== 0) {
+            throw new Exception('CloudFront distribution ' . $distribution_id . ' points to ' . $origin . ', not this site bucket (' . $expected_origin . ').');
+        }
+
+        return array('status' => $status, 'origin' => $origin);
+    }
+
     public function delete_s3_bucket($bucket_name) {
         try {
             $result = $this->make_s3_request('DELETE', $bucket_name);
