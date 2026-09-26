@@ -94,6 +94,7 @@ class Enhanced_S3_Queue_Manager {
                 ),
                 array('id' => $log_id)
             );
+            $this->notify_pipeline_failure($log_id, 'Failed to queue: ' . $result['error']);
             
             throw new Exception('Failed to queue upload: ' . $result['error']);
         }
@@ -454,144 +455,214 @@ class Enhanced_S3_Queue_Manager {
             $formats,
             array('%d')
         );
+
+        if ($status === 'failed' && $error_message) {
+            $this->notify_pipeline_failure($log_id, $error_message);
+        }
     }
     
     private function handle_upload($message_body, $log_id) {
         try {
-            $attachment_id = $message_body['attachment_id'];
-            $file_path = $message_body['file_path'];
+            $attachment_id = absint($message_body['attachment_id']);
+            $file_path = get_attached_file($attachment_id);
             
             if (!file_exists($file_path)) {
                 throw new Exception('File does not exist: ' . $file_path);
             }
-            
+
+            if (!wp_attachment_is_image($attachment_id)) {
+                throw new Exception('The FeatherLift delivery pipeline supports image attachments only because every upload is compressed with TinyPNG and converted to WebP.');
+            }
+
             $original_file_size = filesize($file_path);
-            $processing_path = $file_path;
-            $temporary_files = array();
-            $compression_results = null;
-            $resize_results = null;
+            $pipeline = $this->prepare_image_for_delivery($attachment_id, $file_path);
+            $file_path = $pipeline['file_path'];
+
             
-            if ($this->should_resize_before_upload($attachment_id)) {
-                $resize_results = $this->resize_image_for_upload($attachment_id, $processing_path);
-                if ($resize_results['success']) {
-                    $processing_path = $resize_results['file_path'];
-                    $temporary_files[] = $processing_path;
-                    $this->maybe_update_metadata_dimensions($attachment_id, $resize_results);
-                } elseif (isset($resize_results['error'])) {
-                    error_log('FeatherLift Media: Resize failed for attachment ' . $attachment_id . ': ' . $resize_results['error']);
-                }
-            }
-            
-            // Compress image if enabled and it's an image
-            if (isset($this->options['compress_images']) && $this->options['compress_images'] && wp_attachment_is_image($attachment_id)) {
-                $compressor_path = dirname(__FILE__) . '/../includes/image-compressor.php';
-                if (file_exists($compressor_path)) {
-                    require_once $compressor_path;
-                    $compressor = new Enhanced_S3_Image_Compressor($this->options);
-                    
-                    // Create temporary compressed file
-                    $temp_compressed = tempnam(sys_get_temp_dir(), 's3_compressed_');
-                    $compression_result = $compressor->compress_image($processing_path, $temp_compressed);
-                    
-                    if ($compression_result['success']) {
-                        $processing_path = $temp_compressed;
-                        $temporary_files[] = $temp_compressed;
-                        $compression_results = $compression_result;
-                        
-                        // Log compression results
-                        error_log("FeatherLift Media: Compressed attachment {$attachment_id} - Original: " . 
-                            $this->format_bytes($compression_result['original_size']) . 
-                            ", Compressed: " . $this->format_bytes($compression_result['compressed_size']) . 
-                            ", Savings: {$compression_result['savings_percent']}% using {$compression_result['service_used']}");
-                    } else {
-                        // Compression failed, use original file
-                        error_log("FeatherLift Media: Compression failed for attachment {$attachment_id}: " . $compression_result['error']);
-                    }
-                }
-            }
-            
-            // Generate S3 key for main image
             $upload_dir = wp_upload_dir();
             $base_dir = $upload_dir['basedir'];
             $relative_path = str_replace($base_dir, '', $file_path);
             $relative_path = ltrim($relative_path, '/');
             $s3_key = $this->options['s3_prefix'] . $relative_path;
             
-            $mime_type = get_post_mime_type($attachment_id) ?: 'application/octet-stream';
-            $final_file_size = filesize($processing_path);
+            $mime_type = 'image/webp';
+            $final_file_size = filesize($file_path);
             
-            // Upload main image to S3 (compressed or original)
             $upload_result = $this->aws_sdk->upload_file_to_s3(
-                $processing_path,
+                $file_path,
                 $this->options['bucket_name'],
                 $s3_key,
                 $mime_type
             );
             
-            // Clean up temporary compressed file
-            foreach ($temporary_files as $temp_file) {
-                if ($temp_file !== $file_path && file_exists($temp_file)) {
-                    unlink($temp_file);
-                }
-            }
-            
             if (!$upload_result['success']) {
                 throw new Exception('S3 upload failed: ' . $upload_result['error']);
             }
+
+            $this->verify_cloudfront_delivery($s3_key);
             
-            // Upload thumbnails if this is an image
-            if (wp_attachment_is_image($attachment_id) && isset($this->options['upload_thumbnails']) && $this->options['upload_thumbnails']) {
+            if (isset($this->options['upload_thumbnails']) && $this->options['upload_thumbnails']) {
                 $this->upload_thumbnails($attachment_id, $file_path, $s3_key);
             }
             
-            // Save S3 metadata
             update_post_meta($attachment_id, 'enhanced_s3_key', $s3_key);
             update_post_meta($attachment_id, 'enhanced_s3_bucket', $this->options['bucket_name']);
             $s3_url = $this->build_s3_url($s3_key);
-            if ($s3_url) {
-                update_post_meta($attachment_id, 'enhanced_s3_url', esc_url_raw($s3_url));
-            }
+            update_post_meta($attachment_id, 'enhanced_s3_url', esc_url_raw($s3_url));
+            update_post_meta($attachment_id, 'enhanced_s3_delivery_url', esc_url_raw($s3_url));
+            update_post_meta($attachment_id, 'enhanced_s3_reversal_url', esc_url_raw($pipeline['local_url']));
             
-            // Save compression metadata if compression was used
-            if ($compression_results) {
-                update_post_meta($attachment_id, 'enhanced_s3_compressed', '1');
-                update_post_meta($attachment_id, 'enhanced_s3_original_size', $compression_results['original_size']);
-                update_post_meta($attachment_id, 'enhanced_s3_compressed_size', $compression_results['compressed_size']);
-                update_post_meta($attachment_id, 'enhanced_s3_savings_percent', $compression_results['savings_percent']);
-                update_post_meta($attachment_id, 'enhanced_s3_compression_service', $compression_results['service_used']);
-            }
+            update_post_meta($attachment_id, 'enhanced_s3_compressed', '1');
+            update_post_meta($attachment_id, 'enhanced_s3_original_size', $pipeline['compression']['original_size']);
+            update_post_meta($attachment_id, 'enhanced_s3_compressed_size', $pipeline['compression']['compressed_size']);
+            update_post_meta($attachment_id, 'enhanced_s3_savings_percent', $pipeline['compression']['savings_percent']);
+            update_post_meta($attachment_id, 'enhanced_s3_compression_service', 'tinypng');
+            update_post_meta($attachment_id, 'enhanced_s3_converted_to_webp', current_time('mysql'));
             
-            // Prepare completion data
             $completion_data = array(
                 's3_key' => $s3_key,
                 'file_size' => $final_file_size,
-                'original_size' => $original_file_size
+                'original_size' => $original_file_size,
+                'job_meta' => array(
+                    'pipeline' => 'tinypng-webp-s3-cloudfront',
+                    'delivery_url' => $s3_url,
+                    'reversal_url' => $pipeline['local_url']
+                )
             );
             
-            if ($compression_results) {
-                $completion_data['compressed'] = true;
-                $completion_data['compression_savings'] = $compression_results['savings_percent'];
-                $completion_data['compression_service'] = $compression_results['service_used'];
-            }
-            
-            // Update log as completed
             $this->update_log_status($log_id, 'completed', null, $completion_data);
-            
-            // Log successful upload
-            $size_info = $compression_results ? 
-                " (compressed from " . $this->format_bytes($original_file_size) . " to " . $this->format_bytes($final_file_size) . ")" : 
-                " (" . $this->format_bytes($final_file_size) . ")";
-            
-            error_log("FeatherLift Media: Successfully uploaded attachment {$attachment_id} to S3 as {$s3_key}{$size_info}");
+            error_log("FeatherLift Media: Completed TinyPNG, WebP, S3, and CloudFront pipeline for attachment {$attachment_id} as {$s3_key}");
             
         } catch (Exception $e) {
-            // Clean up temporary compressed file on error
-            if (isset($compressed_path) && $compressed_path !== $file_path && file_exists($compressed_path)) {
-                unlink($compressed_path);
-            }
-            
             error_log("FeatherLift Media: Upload failed for attachment {$attachment_id}: " . $e->getMessage());
             $this->update_log_status($log_id, 'failed', $e->getMessage());
+        }
+    }
+
+    private function prepare_image_for_delivery($attachment_id, $original_path) {
+        if (empty($this->options['tinypng_api_key'])) {
+            throw new Exception('TinyPNG API key is required before media can be offloaded.');
+        }
+        if (empty($this->options['use_cloudfront']) || empty($this->options['cloudfront_domain'])) {
+            throw new Exception('A CloudFront domain is required before media can be offloaded.');
+        }
+
+        require_once dirname(__FILE__) . '/image-compressor.php';
+        $compression_options = $this->options;
+        $compression_options['compress_images'] = true;
+        $compression_options['compression_service'] = 'tinypng';
+        $compressor = new Enhanced_S3_Image_Compressor($compression_options);
+        $compressed_path = wp_tempnam(basename($original_path));
+        if (!$compressed_path) {
+            throw new Exception('Unable to create a temporary file for TinyPNG compression.');
+        }
+
+        $compression = $compressor->compress_image($original_path, $compressed_path);
+        if (empty($compression['success'])) {
+            @unlink($compressed_path);
+            throw new Exception('TinyPNG compression failed: ' . ($compression['error'] ?? 'Unknown error'));
+        }
+
+        $editor = wp_get_image_editor($compressed_path);
+        if (is_wp_error($editor)) {
+            @unlink($compressed_path);
+            throw new Exception('WebP conversion failed: ' . $editor->get_error_message());
+        }
+
+        $target_path = trailingslashit(dirname($original_path)) . pathinfo($original_path, PATHINFO_FILENAME) . '.webp';
+        $saved = $editor->save($target_path, 'image/webp');
+        @unlink($compressed_path);
+        if (is_wp_error($saved) || !file_exists($target_path)) {
+            throw new Exception('WebP conversion failed: ' . (is_wp_error($saved) ? $saved->get_error_message() : 'Unable to write the WebP file.'));
+        }
+
+        $local_url = $this->get_local_attachment_url($target_path);
+        update_post_meta($attachment_id, 'enhanced_s3_original_file', $original_path);
+        update_post_meta($attachment_id, 'enhanced_s3_reversal_url', esc_url_raw($local_url));
+        wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => 'image/webp'));
+        update_attached_file($attachment_id, $target_path);
+        $metadata = wp_generate_attachment_metadata($attachment_id, $target_path);
+        if (is_wp_error($metadata) || empty($metadata)) {
+            wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => wp_check_filetype($original_path)['type']));
+            update_attached_file($attachment_id, $original_path);
+            @unlink($target_path);
+            throw new Exception('Unable to regenerate WordPress metadata for the WebP attachment.');
+        }
+        wp_update_attachment_metadata($attachment_id, $metadata);
+
+        return array(
+            'file_path' => $target_path,
+            'local_url' => $local_url,
+            'compression' => $compression
+        );
+    }
+
+    private function get_local_attachment_url($file_path) {
+        $uploads = wp_upload_dir();
+        $relative_path = ltrim(str_replace(wp_normalize_path($uploads['basedir']), '', wp_normalize_path($file_path)), '/');
+        return trailingslashit($uploads['baseurl']) . str_replace(DIRECTORY_SEPARATOR, '/', $relative_path);
+    }
+
+    private function verify_cloudfront_delivery($s3_key) {
+        $domain = trim($this->options['cloudfront_domain'] ?? '');
+        if ($domain === '') {
+            throw new Exception('CloudFront domain is not configured.');
+        }
+
+        $url = 'https://' . $domain . '/' . ltrim($s3_key, '/');
+        $response = wp_remote_get($url, array('timeout' => 20));
+        if (is_wp_error($response)) {
+            throw new Exception('CloudFront delivery check failed: ' . $response->get_error_message());
+        }
+
+        $status_code = wp_remote_retrieve_response_code($response);
+        if ($status_code !== 200) {
+            throw new Exception('CloudFront delivery check returned HTTP ' . $status_code . '.');
+        }
+    }
+
+    private function notify_pipeline_failure($log_id, $error_message) {
+        global $wpdb;
+
+        $logs_table = $wpdb->prefix . 'amagraphs_s3_logs';
+        $log = $wpdb->get_row($wpdb->prepare(
+            "SELECT attachment_id, operation_type, file_name, job_meta FROM {$logs_table} WHERE id = %d",
+            $log_id
+        ));
+        if (!$log) {
+            return;
+        }
+
+        $job_meta = $log->job_meta ? maybe_unserialize($log->job_meta) : array();
+        if (is_array($job_meta) && !empty($job_meta['failure_alert_sent'])) {
+            return;
+        }
+
+        $recipient = 'anshul@amagraphs.com';
+        $site_name = wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES);
+        $subject = sprintf('[%s] FeatherLift Media %s failed', $site_name, $log->operation_type ?: 'pipeline');
+        $message = sprintf(
+            "FeatherLift Media could not complete a queued %s.\n\nAttachment: %s (ID %d)\nFile: %s\nError: %s\n\nReview the operation log: %s",
+            $log->operation_type ?: 'pipeline',
+            get_the_title($log->attachment_id) ?: 'Untitled attachment',
+            (int) $log->attachment_id,
+            $log->file_name ?: 'Unknown file',
+            $error_message,
+            admin_url('upload.php?page=enhanced-s3-logs')
+        );
+
+        if (wp_mail($recipient, $subject, $message)) {
+            if (!is_array($job_meta)) {
+                $job_meta = array();
+            }
+            $job_meta['failure_alert_sent'] = current_time('mysql');
+            $wpdb->update(
+                $logs_table,
+                array('job_meta' => maybe_serialize($job_meta)),
+                array('id' => $log_id),
+                array('%s'),
+                array('%d')
+            );
         }
     }
 
@@ -916,12 +987,15 @@ class Enhanced_S3_Queue_Manager {
             $thumb_s3_key = $s3_dir . '/' . $size_info['file'];
             $thumb_mime = $size_info['mime-type'] ?? 'image/jpeg';
             
-            $this->aws_sdk->upload_file_to_s3(
+            $upload_result = $this->aws_sdk->upload_file_to_s3(
                 $thumb_path,
                 $this->options['bucket_name'],
                 $thumb_s3_key,
                 $thumb_mime
             );
+            if (empty($upload_result['success'])) {
+                throw new Exception('S3 thumbnail upload failed: ' . ($upload_result['error'] ?? $thumb_s3_key));
+            }
         }
     }
 

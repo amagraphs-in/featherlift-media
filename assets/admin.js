@@ -21,7 +21,10 @@
          */
         bindEvents: function() {
             // Setup AWS resources
-            $(document).on('click', '#setup-aws-resources', this.setupAWSResources);
+            $(document).on('click', '.setup-aws-resource', function(e) {
+                e.preventDefault();
+                enhancedS3.setupAWSResources($(this));
+            });
             
             // Refresh logs
             $(document).on('click', '#refresh-logs', this.loadLogs);
@@ -356,23 +359,26 @@
         /**
          * Setup AWS resources automatically
          */
-        setupAWSResources: function() {
-            var $button = $('#setup-aws-resources');
+        setupAWSResources: function($button) {
+            $button = $button && $button.length ? $button : $('#setup-aws-resources');
             var $status = $('#setup-status');
+            var resource = $button.data('resource') || 'all';
+            var originalText = $button.text();
             
             $button.prop('disabled', true).text('Setting up...');
-            $status.html('<div class="notice notice-info"><p>Setting up AWS resources...</p></div>');
+            $status.html('<div class="notice notice-info"><p>Setting up AWS resource...</p></div>');
             
             $.ajax({
                 url: enhancedS3Ajax.ajaxurl,
                 type: 'POST',
                 data: {
                     action: 'setup_aws_resources',
+                    resource: resource,
                     nonce: enhancedS3Ajax.nonce
                 },
                 success: function(response) {
                     if (response.success) {
-                        $status.html('<div class="notice notice-success"><p>AWS resources created successfully!</p><ul>' +
+                        $status.html('<div class="notice notice-success"><p>AWS resource setup completed successfully.</p><ul>' +
                             '<li><strong>Bucket:</strong> ' + response.data.bucket_name + '</li>' +
                             '<li><strong>Queue:</strong> ' + response.data.queue_url + '</li>' +
                             (response.data.cloudfront_domain ? '<li><strong>CloudFront:</strong> ' + response.data.cloudfront_domain + '</li>' : '') +
@@ -390,7 +396,7 @@
                     $status.html('<div class="notice notice-error"><p>Network error occurred</p></div>');
                 },
                 complete: function() {
-                    $button.prop('disabled', false).text('Setup AWS Resources');
+                    $button.prop('disabled', false).text(originalText);
                 }
             });
         },

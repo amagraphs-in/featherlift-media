@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.10
+ * Version: 1.1.11
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.10';
+    private $version = '1.1.11';
     private $required_bucket_name = 'ama-public-na';
     private $options;
     private $db_version = '2.1.0';
@@ -71,6 +71,7 @@ class Enhanced_S3_Media_Upload {
     private $auto_resize_images;
     private $resize_max_width;
     private $resize_max_height;
+    private $convert_to_webp;
     private $default_resize_cap = 2560;
     private $ai_alt_enabled;
     private $ai_agent;
@@ -159,6 +160,7 @@ class Enhanced_S3_Media_Upload {
         $this->auto_resize_images = (bool) $this->get_option('auto_resize_images', false);
         $this->resize_max_width = intval($this->get_option('resize_max_width', $this->default_resize_cap));
         $this->resize_max_height = intval($this->get_option('resize_max_height', $this->default_resize_cap));
+        $this->convert_to_webp = (bool) $this->get_option('convert_to_webp', false);
         $stored_ai_enabled = (bool) $this->get_option('ai_alt_enabled', false);
         $this->ai_features_available = (bool) apply_filters('enhanced_s3_ai_ui_enabled', true);
         $this->ai_alt_enabled = $this->ai_features_available ? $stored_ai_enabled : false;
@@ -499,7 +501,7 @@ class Enhanced_S3_Media_Upload {
         printf('<div class="%1$s"><p>%2$s</p></div>', esc_attr($class), esc_html($notice['message']));
     }
 
-    private function provision_aws_stack() {
+    private function provision_aws_stack($resource = 'all') {
         if (!$this->aws_sdk) {
             $this->init_aws_components();
         }
@@ -508,10 +510,18 @@ class Enhanced_S3_Media_Upload {
             throw new Exception('AWS SDK not initialized. Please verify credentials.');
         }
 
+        $allowed_resources = array('all', 'bucket', 'queue', 'cloudfront');
+        if (!in_array($resource, $allowed_resources, true)) {
+            throw new Exception('Unknown AWS resource requested.');
+        }
+
+        $create_bucket = in_array($resource, array('all', 'bucket', 'cloudfront'), true);
+        $create_queue = in_array($resource, array('all', 'queue'), true);
+        $create_cloudfront = in_array($resource, array('all', 'cloudfront'), true);
         $updates = array();
         $bucket_name = $this->bucket_name;
 
-        if (empty($bucket_name)) {
+        if ($create_bucket && empty($bucket_name)) {
             $bucket_name = $this->required_bucket_name;
             if (trim($this->get_option('bucket_name')) !== $bucket_name) {
                 throw new Exception('S3 bucket must be set to ' . $bucket_name . ' before setup.');
@@ -528,7 +538,7 @@ class Enhanced_S3_Media_Upload {
             $updates['bucket_name'] = $bucket_result['bucket_name'] ?? $bucket_name;
         }
 
-        if (empty($this->sqs_queue_url)) {
+        if ($create_queue && empty($this->sqs_queue_url)) {
             $site_name = sanitize_title(get_bloginfo('name'));
             $unique_id = substr(md5(get_site_url()), 0, 8);
             $queue_result = $this->aws_sdk->create_sqs_queue($site_name . '-' . $unique_id);
@@ -545,11 +555,24 @@ class Enhanced_S3_Media_Upload {
             $updates['sqs_queue_url'] = $queue_url;
         }
 
-        if ($this->use_cloudfront && empty($this->cloudfront_domain)) {
-            throw new Exception('Enter and save your CloudFront domain before setup.');
+        $effective_bucket_name = $updates['bucket_name'] ?? $bucket_name;
+        if ($create_cloudfront && empty($this->cloudfront_domain)) {
+            if (empty($effective_bucket_name)) {
+                throw new Exception('Create the S3 bucket before creating CloudFront.');
+            }
+
+            $cloudfront_result = $this->aws_sdk->create_cloudfront_distribution($effective_bucket_name);
+            if (empty($cloudfront_result['success']) || empty($cloudfront_result['domain'])) {
+                throw new Exception('Failed to create CloudFront distribution: ' . ($cloudfront_result['error'] ?? 'unknown error'));
+            }
+
+            $updates['cloudfront_domain'] = $cloudfront_result['domain'];
+            $updates['cloudfront_distribution_id'] = $cloudfront_result['distribution_id'] ?? '';
+            $updates['use_cloudfront'] = '1';
+            $updates['serve_media_from_cdn'] = '1';
         }
 
-        if (empty($this->options['s3_prefix'])) {
+        if (($resource === 'all' || $resource === 'bucket') && empty($this->options['s3_prefix'])) {
             $updates['s3_prefix'] = 'wp-content/uploads/';
         }
 
@@ -562,7 +585,8 @@ class Enhanced_S3_Media_Upload {
             'queue_url' => $this->sqs_queue_url,
             'cloudfront_domain' => $this->cloudfront_domain,
             'cloudfront_distribution_id' => $this->cloudfront_distribution_id,
-            'message' => 'AWS resources configured successfully'
+            'resource' => $resource,
+            'message' => 'AWS resource setup completed successfully'
         );
     }
 
@@ -646,6 +670,7 @@ class Enhanced_S3_Media_Upload {
             'auto_resize_images'   => 'Enable resizing rules',
             'resize_max_width'     => 'Max width (px)',
             'resize_max_height'    => 'Max height (px)',
+            'convert_to_webp'      => 'Convert attachments to WebP',
             'compress_images'      => 'Enable compression service',
             'compression_service'  => 'Preferred optimizer',
             'compression_quality'  => 'Native quality',
@@ -935,6 +960,12 @@ class Enhanced_S3_Media_Upload {
         echo '<label><input type="checkbox" id="enhanced-s3-auto-resize" name="enhanced_s3_settings[auto_resize_images]" value="1" ' . checked($value, true, false) . '> Resize originals before S3 upload</label>';
     }
 
+    public function convert_to_webp_field() {
+        $value = $this->get_option('convert_to_webp', false);
+        echo '<label><input type="checkbox" name="enhanced_s3_settings[convert_to_webp]" value="1" ' . checked($value, true, false) . '> Replace image attachments with WebP during optimization</label>';
+        echo '<p class="description">Requires WordPress image-editor WebP support. FeatherLift regenerates thumbnails and updates the attachment to use the WebP file.</p>';
+    }
+
     public function resize_max_width_field() {
         $value = intval($this->get_option('resize_max_width', 2048));
         $enabled = (bool) $this->get_option('auto_resize_images', false);
@@ -978,7 +1009,7 @@ class Enhanced_S3_Media_Upload {
             'nonce' => wp_create_nonce('enhanced_s3_nonce'),
             'strings' => array(
                 'setting_up' => 'Setting up AWS resources...',
-                'uploading' => 'Queuing upload...',
+                'uploading' => 'Queuing TinyPNG, WebP, S3, and CloudFront processing...',
                 'downloading' => 'Queuing download...',
                 'success' => 'Operation completed successfully',
                 'error' => 'Operation failed',
@@ -1296,7 +1327,7 @@ class Enhanced_S3_Media_Upload {
             echo '<button type="button" class="button featherlite-optimize-selected is-hidden">' . esc_html__('Optimize Selected', 'enhanced-s3') . '</button>';
         }
         if ($this->offload_media) {
-            $upload_label = $this->optimize_media ? esc_html__('Upload Selected to S3', 'enhanced-s3') : esc_html__('Upload Selected', 'enhanced-s3');
+            $upload_label = esc_html__('Process & Upload Selected', 'enhanced-s3');
             $disabled = $this->is_configured() ? '' : 'disabled="disabled"';
             $upload_classes = 'button button-primary featherlite-upload-selected is-hidden';
             if (!$this->is_configured()) {
@@ -1491,7 +1522,7 @@ class Enhanced_S3_Media_Upload {
                 $html .= '<button type="button" class="button button-small enhanced-s3-optimize-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Optimize', 'enhanced-s3') . '</button>';
             }
             if ($row['can_upload'] && !$row['is_offloaded']) {
-                $html .= '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Upload to S3', 'enhanced-s3') . '</button>';
+                $html .= '<button type="button" class="button button-small enhanced-s3-upload-btn" data-attachment-id="' . esc_attr($row['id']) . '">' . esc_html__('Process & Upload', 'enhanced-s3') . '</button>';
             } elseif ($this->offload_media && !$this->is_configured()) {
                 $html .= '<span class="featherlite-hint">' . esc_html__('Add AWS keys to enable upload', 'enhanced-s3') . '</span>';
             } elseif ($row['is_offloaded']) {
@@ -1678,6 +1709,13 @@ class Enhanced_S3_Media_Upload {
             <div class="aws-setup-section">
                 <h3><?php esc_html_e('AWS Resource Management', 'enhanced-s3'); ?></h3>
                 <?php $is_setup = !empty($this->bucket_name) && !empty($this->sqs_queue_url); ?>
+                <p class="description"><?php esc_html_e('Create resources individually, or use Set Up All to create the S3 bucket, SQS queue, and CloudFront distribution in order. The upload prefix is created automatically when the first file is stored.', 'enhanced-s3'); ?></p>
+                <p class="aws-resource-actions">
+                    <button type="button" class="button setup-aws-resource" data-resource="bucket" <?php disabled(!empty($this->bucket_name)); ?>><?php esc_html_e('Create S3 Bucket', 'enhanced-s3'); ?></button>
+                    <button type="button" class="button setup-aws-resource" data-resource="queue" <?php disabled(!empty($this->sqs_queue_url)); ?>><?php esc_html_e('Create SQS Queue', 'enhanced-s3'); ?></button>
+                    <button type="button" class="button setup-aws-resource" data-resource="cloudfront" <?php disabled(!empty($this->cloudfront_domain)); ?>><?php esc_html_e('Create CloudFront Distribution', 'enhanced-s3'); ?></button>
+                    <button type="button" id="setup-aws-resources" class="button button-primary setup-aws-resource" data-resource="all"><?php esc_html_e('Set Up All AWS Resources', 'enhanced-s3'); ?></button>
+                </p>
                 <?php if ($is_setup): ?>
                     <p class="aws-setup-status aws-setup-status--ready">&#10003; <?php esc_html_e('AWS resources are configured and ready.', 'enhanced-s3'); ?></p>
                     <p>
@@ -1698,8 +1736,7 @@ class Enhanced_S3_Media_Upload {
                         </div>
                     </div>
                 <?php else: ?>
-                    <p><?php esc_html_e('Your AWS credentials are saved. Finish setup to create the bucket, queue, and optional CDN.', 'enhanced-s3'); ?></p>
-                    <button type="button" id="setup-aws-resources" class="button button-primary"><?php esc_html_e('Setup AWS Resources', 'enhanced-s3'); ?></button>
+                    <p><?php esc_html_e('Your AWS credentials are saved. Create the required resources above.', 'enhanced-s3'); ?></p>
                 <?php endif; ?>
                 <div class="aws-test-block">
                     <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
@@ -1981,10 +2018,10 @@ class Enhanced_S3_Media_Upload {
                 
                 <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                     <button type="button" id="upload-current-page" class="button button-primary">
-                        Upload This Page to S3
+                        Process &amp; Upload This Page
                     </button>
                     <button type="button" id="bulk-upload" class="button button-primary" disabled>
-                        Upload Selected to S3 (<span id="upload-count">0</span> files, <span id="upload-size">0 Bytes</span>)
+                        Process &amp; Upload Selected (<span id="upload-count">0</span> files, <span id="upload-size">0 Bytes</span>)
                     </button>
                     <button type="button" id="bulk-download" class="button button-secondary" disabled>
                         Download Selected from S3 (<span id="download-count">0</span> files, <span id="download-size">0 Bytes</span>)
@@ -2392,7 +2429,8 @@ class Enhanced_S3_Media_Upload {
         }
         
         try {
-            $result = $this->provision_aws_stack();
+            $resource = isset($_POST['resource']) ? sanitize_key(wp_unslash($_POST['resource'])) : 'all';
+            $result = $this->provision_aws_stack($resource);
             wp_send_json_success($result);
         } catch (Exception $e) {
             wp_send_json_error($e->getMessage());
@@ -2709,10 +2747,10 @@ file_put_contents($temp_file, $test_content);
             return array('success' => true, 'skipped' => true, 'message' => 'Optimization skipped for non-image files');
         }
 
-        if (!$this->auto_resize_images && !$this->compress_images) {
+        if (!$this->auto_resize_images && !$this->compress_images && !$this->convert_to_webp) {
             return array(
                 'success' => false,
-                'error' => 'Enable resizing or compression rules in FeatherLift Media settings before optimizing.'
+                'error' => 'Enable resizing, compression, or WebP conversion in FeatherLift Media settings before optimizing.'
             );
         }
 
@@ -2721,10 +2759,13 @@ file_put_contents($temp_file, $test_content);
         $temporary_files = array();
         $resize_details = null;
         $compression_details = null;
+        $webp_details = null;
         $resize_attempted = false;
         $compression_attempted = false;
+        $webp_attempted = false;
         $resize_error = '';
         $compression_error = '';
+        $webp_error = '';
 
         if ($this->auto_resize_images) {
             $resize_attempted = true;
@@ -2769,16 +2810,31 @@ file_put_contents($temp_file, $test_content);
             }
         }
 
+        if ($this->convert_to_webp && wp_get_image_mime($processing_path) !== 'image/webp') {
+            $webp_attempted = true;
+            $webp_details = $this->create_webp_copy_for_local_opt($processing_path);
+            if (!empty($webp_details['success'])) {
+                $processing_path = $webp_details['file_path'];
+                $temporary_files[] = $processing_path;
+            } else {
+                $webp_error = $webp_details['error'] ?? 'WebP conversion failed.';
+            }
+        }
+
         $resize_success = !empty($resize_details['success']);
         $compression_success = !empty($compression_details);
+        $webp_success = !empty($webp_details['success']);
 
-        if (!$resize_success && !$compression_success) {
+        if (!$resize_success && !$compression_success && !$webp_success) {
             $error_messages = array();
             if ($compression_attempted && $compression_error) {
                 $error_messages[] = 'Compression failed: ' . $compression_error;
             }
             if ($resize_attempted && $resize_error) {
                 $error_messages[] = 'Resize failed: ' . $resize_error;
+            }
+            if ($webp_attempted && $webp_error) {
+                $error_messages[] = 'WebP conversion failed: ' . $webp_error;
             }
             if (empty($error_messages)) {
                 $error_messages[] = 'No optimization rules were applied to this file.';
@@ -2796,7 +2852,18 @@ file_put_contents($temp_file, $test_content);
             );
         }
 
-        if ($processing_path !== $file_path) {
+        if ($webp_success) {
+            $webp_replace = $this->replace_attachment_with_webp($attachment_id, $file_path, $processing_path);
+            if (empty($webp_replace['success'])) {
+                foreach ($temporary_files as $temp) {
+                    if ($temp !== $file_path && file_exists($temp)) {
+                        unlink($temp);
+                    }
+                }
+                return array('success' => false, 'error' => $webp_replace['error'] ?? 'Unable to replace attachment with WebP');
+            }
+            $file_path = $webp_replace['file_path'];
+        } elseif ($processing_path !== $file_path) {
             if (!copy($processing_path, $file_path)) {
                 foreach ($temporary_files as $temp) {
                     if ($temp !== $file_path && file_exists($temp)) {
@@ -2834,6 +2901,7 @@ file_put_contents($temp_file, $test_content);
             'success' => true,
             'resized' => !empty($resize_details['success']),
             'compressed' => !empty($compression_details),
+            'converted_to_webp' => $webp_success,
             'original_size' => $original_size,
             'final_size' => $final_size,
             'savings_percent' => $savings,
@@ -2888,6 +2956,58 @@ file_put_contents($temp_file, $test_content);
             'width' => $saved['width'] ?? null,
             'height' => $saved['height'] ?? null
         );
+    }
+
+    private function create_webp_copy_for_local_opt($file_path) {
+        if (!function_exists('wp_get_image_editor')) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+        if (!function_exists('wp_tempnam')) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+
+        $editor = wp_get_image_editor($file_path);
+        if (is_wp_error($editor)) {
+            return array('success' => false, 'error' => $editor->get_error_message());
+        }
+
+        $temp_path = wp_tempnam(pathinfo($file_path, PATHINFO_FILENAME) . '.webp');
+        if (!$temp_path) {
+            return array('success' => false, 'error' => 'Unable to create a temporary WebP file.');
+        }
+
+        $saved = $editor->save($temp_path, 'image/webp');
+        if (is_wp_error($saved)) {
+            unlink($temp_path);
+            return array('success' => false, 'error' => $saved->get_error_message());
+        }
+
+        return array('success' => true, 'file_path' => $saved['path'] ?? $temp_path);
+    }
+
+    private function replace_attachment_with_webp($attachment_id, $original_path, $webp_path) {
+        $target_path = trailingslashit(dirname($original_path)) . pathinfo($original_path, PATHINFO_FILENAME) . '.webp';
+        if (!copy($webp_path, $target_path)) {
+            return array('success' => false, 'error' => 'Unable to write the WebP attachment file.');
+        }
+
+        $original_mime = get_post_mime_type($attachment_id);
+        wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => 'image/webp'));
+        update_attached_file($attachment_id, $target_path);
+        $metadata = wp_generate_attachment_metadata($attachment_id, $target_path);
+        if (is_wp_error($metadata) || empty($metadata)) {
+            wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => $original_mime));
+            update_attached_file($attachment_id, $original_path);
+            unlink($target_path);
+            return array('success' => false, 'error' => is_wp_error($metadata) ? $metadata->get_error_message() : 'Unable to regenerate WebP attachment metadata.');
+        }
+
+        wp_update_attachment_metadata($attachment_id, $metadata);
+        if ($original_path !== $target_path && file_exists($original_path)) {
+            unlink($original_path);
+        }
+
+        return array('success' => true, 'file_path' => $target_path);
     }
 
     private function update_attachment_dimensions_from_resize($attachment_id, $resize_details) {
@@ -2991,7 +3111,7 @@ file_put_contents($temp_file, $test_content);
                             </button>
                         <?php else: ?>
                             <button type="button" class="button button-primary" onclick="enhancedS3.queueUpload(<?php echo $post->ID; ?>)">
-                                Upload to S3
+                                Process &amp; Upload
                             </button>
                         <?php endif; ?>
                     <?php else: ?>
@@ -3041,7 +3161,7 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function register_media_bulk_actions($bulk_actions) {
-        $bulk_actions['enhanced_s3_bulk_upload'] = 'Upload to S3';
+        $bulk_actions['enhanced_s3_bulk_upload'] = 'Process & Upload to CloudFront';
         $bulk_actions['enhanced_s3_bulk_download'] = 'Download from S3';
         if ($this->ai_alt_enabled) {
             $bulk_actions['enhanced_s3_bulk_generate_alt'] = 'Generate Alt Tags (AI)';
@@ -4378,6 +4498,7 @@ file_put_contents($temp_file, $test_content);
             'auto_upload_new_files',
             'preserve_bucket_permissions',
             'auto_resize_images',
+            'convert_to_webp',
             'ai_alt_enabled',
             'ai_skip_existing_alt',
             'optimize_media',
@@ -4923,6 +5044,7 @@ file_put_contents($temp_file, $test_content);
             'auto_resize_images' => $current_settings['auto_resize_images'] ?? '',
             'resize_max_width' => $current_settings['resize_max_width'] ?? 0,
             'resize_max_height' => $current_settings['resize_max_height'] ?? 0,
+            'convert_to_webp' => $current_settings['convert_to_webp'] ?? '',
             'ai_alt_enabled' => $current_settings['ai_alt_enabled'] ?? '',
             'ai_agent' => $current_settings['ai_agent'] ?? 'openai',
             'ai_model' => $current_settings['ai_model'] ?? 'gpt-4o-mini',
