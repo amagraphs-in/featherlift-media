@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.19
+ * Version: 1.1.20
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.19';
+    private $version = '1.1.20';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -84,6 +84,10 @@ class Enhanced_S3_Media_Upload {
     private $intent_committed = false;
     private $ai_features_available = false;
     private $auto_alt_generation_in_progress = array();
+    private $internal_regeneration = array();
+    const THUMB_REGEN_STATE = 'enhanced_s3_thumb_regen_state';
+    const THUMB_REGEN_STOP = 'enhanced_s3_thumb_regen_stop';
+    const THUMB_REGEN_HOOK = 'enhanced_s3_regenerate_thumbnails';
     
     // Database table names
     private $logs_table;
@@ -245,6 +249,10 @@ class Enhanced_S3_Media_Upload {
         add_action('wp_ajax_test_cloudfront_connection', array($this, 'ajax_test_cloudfront_connection'));
         add_action('wp_ajax_test_sqs_connection', array($this, 'ajax_test_sqs_connection'));
         add_action('wp_ajax_get_log_stats', array($this, 'ajax_get_log_stats'));
+        add_action('wp_ajax_start_thumbnail_regeneration', array($this, 'ajax_start_thumbnail_regeneration'));
+        add_action('wp_ajax_stop_thumbnail_regeneration', array($this, 'ajax_stop_thumbnail_regeneration'));
+        add_action('wp_ajax_get_thumbnail_regeneration_status', array($this, 'ajax_get_thumbnail_regeneration_status'));
+        add_action(self::THUMB_REGEN_HOOK, array($this, 'run_thumbnail_regeneration_batch'));
 
         // Media library hooks
         add_filter('attachment_fields_to_edit', array($this, 'add_media_fields'), 10, 2);
@@ -268,6 +276,7 @@ class Enhanced_S3_Media_Upload {
         
         // URL replacement hooks
         add_filter('wp_get_attachment_url', array($this, 'get_attachment_url'), 10, 2);
+        add_filter('wp_update_attachment_metadata', array($this, 'guard_stale_attachment_metadata'), 99, 2);
         add_filter('wp_calculate_image_srcset', array($this, 'update_image_srcset'), 10, 5);
         add_filter('script_loader_src', array($this, 'get_static_asset_url'), 10, 2);
         add_filter('style_loader_src', array($this, 'get_static_asset_url'), 10, 2);
@@ -319,6 +328,174 @@ class Enhanced_S3_Media_Upload {
         
         $count = $this->queue_manager->retry_failed_operations();
         wp_send_json_success(array('count' => $count));
+    }
+
+    public function ajax_start_thumbnail_regeneration() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+        if (!$this->queue_manager) {
+            wp_send_json_error('AWS is not configured.');
+        }
+
+        $state = $this->get_thumbnail_regeneration_state();
+        $resume = isset($_POST['resume']) && $_POST['resume'] === 'true' && in_array($state['status'], array('stopped', 'running'), true);
+
+        if (!$resume) {
+            global $wpdb;
+            $total = (int) $wpdb->get_var(
+                "SELECT COUNT(DISTINCT p.ID) FROM {$wpdb->posts} p
+                INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = 'enhanced_s3_key'
+                WHERE p.post_type = 'attachment' AND p.post_mime_type LIKE 'image/%'"
+            );
+            $state = array(
+                'status' => 'running',
+                'only_broken' => !isset($_POST['only_broken']) || $_POST['only_broken'] === 'true',
+                'last_id' => 0,
+                'total' => $total,
+                'processed' => 0,
+                'fixed' => 0,
+                'skipped' => 0,
+                'failed' => 0,
+                'errors' => array(),
+                'started_at' => current_time('mysql'),
+                'completed_at' => ''
+            );
+        } else {
+            $state['status'] = 'running';
+        }
+
+        delete_option(self::THUMB_REGEN_STOP);
+        update_option(self::THUMB_REGEN_STATE, $state, false);
+        if (!wp_next_scheduled(self::THUMB_REGEN_HOOK)) {
+            wp_schedule_event(time(), 'every_30_seconds', self::THUMB_REGEN_HOOK);
+        }
+
+        wp_send_json_success($state);
+    }
+
+    public function ajax_stop_thumbnail_regeneration() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        update_option(self::THUMB_REGEN_STOP, 1, false);
+        $state = $this->get_thumbnail_regeneration_state();
+        if ($state['status'] === 'running') {
+            $state['status'] = 'stopped';
+            update_option(self::THUMB_REGEN_STATE, $state, false);
+        }
+        wp_clear_scheduled_hook(self::THUMB_REGEN_HOOK);
+
+        wp_send_json_success($state);
+    }
+
+    public function ajax_get_thumbnail_regeneration_status() {
+        check_ajax_referer('enhanced_s3_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Insufficient permissions');
+        }
+
+        // While the settings page is open, each poll also advances the job instead of waiting for cron.
+        $state = $this->get_thumbnail_regeneration_state();
+        if ($state['status'] === 'running' && isset($_POST['process']) && $_POST['process'] === 'true') {
+            $state = $this->run_thumbnail_regeneration_batch(12);
+        }
+
+        wp_send_json_success($state);
+    }
+
+    private function get_thumbnail_regeneration_state() {
+        wp_cache_delete(self::THUMB_REGEN_STATE, 'options');
+        $state = get_option(self::THUMB_REGEN_STATE, array());
+        return wp_parse_args(is_array($state) ? $state : array(), array(
+            'status' => 'idle',
+            'only_broken' => true,
+            'last_id' => 0,
+            'total' => 0,
+            'processed' => 0,
+            'fixed' => 0,
+            'skipped' => 0,
+            'failed' => 0,
+            'errors' => array(),
+            'started_at' => '',
+            'completed_at' => ''
+        ));
+    }
+
+    private function thumbnail_regeneration_stop_requested() {
+        wp_cache_delete(self::THUMB_REGEN_STOP, 'options');
+        return (bool) get_option(self::THUMB_REGEN_STOP, false);
+    }
+
+    /**
+     * Process attachments for the thumbnail regeneration job until the time budget runs out.
+     */
+    public function run_thumbnail_regeneration_batch($time_budget = 20) {
+        $state = $this->get_thumbnail_regeneration_state();
+        if ($state['status'] !== 'running') {
+            wp_clear_scheduled_hook(self::THUMB_REGEN_HOOK);
+            return $state;
+        }
+        if (!$this->queue_manager || get_transient('enhanced_s3_thumb_regen_lock')) {
+            return $state;
+        }
+
+        set_transient('enhanced_s3_thumb_regen_lock', 1, 5 * MINUTE_IN_SECONDS);
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(300);
+        }
+
+        global $wpdb;
+        $deadline = microtime(true) + max(1, (int) $time_budget);
+
+        while (microtime(true) < $deadline) {
+            $ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT DISTINCT p.ID FROM {$wpdb->posts} p
+                INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = 'enhanced_s3_key'
+                WHERE p.post_type = 'attachment' AND p.post_mime_type LIKE 'image/%%' AND p.ID > %d
+                ORDER BY p.ID ASC LIMIT 10",
+                $state['last_id']
+            ));
+
+            if (empty($ids)) {
+                $state['status'] = 'completed';
+                $state['completed_at'] = current_time('mysql');
+                wp_clear_scheduled_hook(self::THUMB_REGEN_HOOK);
+                break;
+            }
+
+            foreach ($ids as $id) {
+                try {
+                    $result = $this->queue_manager->regenerate_attachment_thumbnails($id, !empty($state['only_broken']));
+                    $state[$result === 'fixed' ? 'fixed' : 'skipped']++;
+                } catch (Exception $e) {
+                    $state['failed']++;
+                    $state['errors'][] = 'ID ' . $id . ': ' . $e->getMessage();
+                    $state['errors'] = array_slice($state['errors'], -20);
+                    error_log('FeatherLift Media: Thumbnail regeneration failed for attachment ' . $id . ': ' . $e->getMessage());
+                }
+
+                $state['processed']++;
+                $state['last_id'] = (int) $id;
+
+                if ($this->thumbnail_regeneration_stop_requested()) {
+                    $state['status'] = 'stopped';
+                }
+                update_option(self::THUMB_REGEN_STATE, $state, false);
+
+                if ($state['status'] !== 'running' || microtime(true) >= $deadline) {
+                    break 2;
+                }
+            }
+        }
+
+        update_option(self::THUMB_REGEN_STATE, $state, false);
+        delete_transient('enhanced_s3_thumb_regen_lock');
+
+        return $state;
     }
 
     public function ajax_generate_ai_alt_tag() {
@@ -425,6 +602,12 @@ class Enhanced_S3_Media_Upload {
             return $metadata;
         }
 
+        // Metadata regenerated by the pipeline itself must not re-trigger alt generation or another upload.
+        if (!empty($this->internal_regeneration[$attachment_id])
+            || (class_exists('Enhanced_S3_Queue_Manager') && !empty(Enhanced_S3_Queue_Manager::$regenerating[$attachment_id]))) {
+            return $metadata;
+        }
+
         if ($this->ai_alt_enabled && wp_attachment_is_image($attachment_id) && empty($this->auto_alt_generation_in_progress[$attachment_id])) {
             $this->auto_alt_generation_in_progress[$attachment_id] = true;
             $alt_result = $this->generate_ai_alt_text($attachment_id, false, array(
@@ -439,6 +622,12 @@ class Enhanced_S3_Media_Upload {
         // This ensures thumbnails are generated before S3 upload
         // The queue will process this after thumbnail generation is complete
         $this->auto_upload_new_attachment($attachment_id);
+
+        // The pipeline may have replaced the file with WebP; hand core the fresh metadata instead of the stale original.
+        $current = wp_get_attachment_metadata($attachment_id, true);
+        if (is_array($current) && !empty($current['file']) && $current['file'] === get_post_meta($attachment_id, '_wp_attached_file', true)) {
+            return $current;
+        }
         
         return $metadata;
     }
@@ -1804,6 +1993,20 @@ echo esc_html(wp_json_encode(array(
                 <?php else: ?>
                     <p><?php esc_html_e('Your saved AWS credentials will be checked as each resource is configured.', 'enhanced-s3'); ?></p>
                 <?php endif; ?>
+                <?php if ($aws_ready && !empty($this->bucket_name)) : ?>
+                    <?php $regen_state = $this->get_thumbnail_regeneration_state(); ?>
+                    <div class="reset-options" id="thumbnail-regeneration">
+                        <h4><?php esc_html_e('Regenerate Thumbnails', 'enhanced-s3'); ?></h4>
+                        <p class="description"><?php esc_html_e('Rebuilds thumbnail sizes for offloaded images from the delivered WebP file, uploads them to S3, and rewrites old thumbnail URLs in post content. Runs in the background in small batches; missing local files are downloaded from S3 temporarily.', 'enhanced-s3'); ?></p>
+                        <p><label><input type="checkbox" id="thumb-regen-only-broken" <?php checked(!empty($regen_state['only_broken'])); ?>> <?php esc_html_e('Only fix images with mismatched thumbnails (recommended)', 'enhanced-s3'); ?></label></p>
+                        <p>
+                            <button type="button" id="thumb-regen-start" class="button button-primary"><?php esc_html_e('Start Regeneration', 'enhanced-s3'); ?></button>
+                            <button type="button" id="thumb-regen-resume" class="button" <?php disabled($regen_state['status'] !== 'stopped'); ?>><?php esc_html_e('Resume', 'enhanced-s3'); ?></button>
+                            <button type="button" id="thumb-regen-stop" class="button button-secondary" <?php disabled($regen_state['status'] !== 'running'); ?>><?php esc_html_e('Stop', 'enhanced-s3'); ?></button>
+                        </p>
+                        <div id="thumb-regen-status" data-status="<?php echo esc_attr($regen_state['status']); ?>"></div>
+                    </div>
+                <?php endif; ?>
                 <details class="aws-test-block">
                     <summary><?php esc_html_e('Connection diagnostics', 'enhanced-s3'); ?></summary>
                     <h4><?php esc_html_e('Test Connections', 'enhanced-s3'); ?></h4>
@@ -1825,6 +2028,77 @@ echo esc_html(wp_json_encode(array(
         
         <script type="text/javascript">
         jQuery(document).ready(function($) {
+            var $regenStatus = $('#thumb-regen-status');
+            var regenPolling = false;
+
+            function renderRegenState(state) {
+                if (!state) {
+                    return;
+                }
+                var total = parseInt(state.total, 10) || 0;
+                var processed = parseInt(state.processed, 10) || 0;
+                var pct = total ? Math.min(100, Math.round(processed / total * 100)) : 0;
+                var $p = $('<p>').text('Status: ' + state.status + ' — ' + processed + ' / ' + total + ' (' + pct + '%). Fixed: ' + state.fixed + ', skipped: ' + state.skipped + ', failed: ' + state.failed + '.');
+                $regenStatus.empty().append($p);
+                if (state.errors && state.errors.length) {
+                    var $list = $('<ul class="thumb-regen-errors">');
+                    state.errors.slice(-5).forEach(function(err) { $list.append($('<li>').text(err)); });
+                    $regenStatus.append($list);
+                }
+                $('#thumb-regen-stop').prop('disabled', state.status !== 'running');
+                $('#thumb-regen-resume').prop('disabled', state.status !== 'stopped');
+                $('#thumb-regen-start').prop('disabled', state.status === 'running');
+            }
+
+            function pollRegen(process) {
+                if (regenPolling) {
+                    return;
+                }
+                regenPolling = true;
+                $.post(ajaxurl, { action: 'get_thumbnail_regeneration_status', nonce: enhancedS3Ajax.nonce, process: process ? 'true' : 'false' })
+                    .done(function(response) {
+                        if (response && response.success) {
+                            renderRegenState(response.data);
+                            if (response.data.status === 'running') {
+                                setTimeout(function() { pollRegen(true); }, 1500);
+                            }
+                        }
+                    })
+                    .fail(function() {
+                        setTimeout(function() { pollRegen(true); }, 10000);
+                    })
+                    .always(function() { regenPolling = false; });
+            }
+
+            function startRegen(resume) {
+                if (!resume && !confirm('Regenerate thumbnails for offloaded images? This runs in the background and can take a long time on large libraries.')) {
+                    return;
+                }
+                $.post(ajaxurl, {
+                    action: 'start_thumbnail_regeneration',
+                    nonce: enhancedS3Ajax.nonce,
+                    resume: resume ? 'true' : 'false',
+                    only_broken: $('#thumb-regen-only-broken').is(':checked') ? 'true' : 'false'
+                }).done(function(response) {
+                    if (response && response.success) {
+                        renderRegenState(response.data);
+                        pollRegen(true);
+                    } else {
+                        $regenStatus.empty().append($('<p>').text(response && response.data ? response.data : 'Unable to start regeneration.'));
+                    }
+                });
+            }
+
+            $('#thumb-regen-start').on('click', function() { startRegen(false); });
+            $('#thumb-regen-resume').on('click', function() { startRegen(true); });
+            $('#thumb-regen-stop').on('click', function() {
+                $.post(ajaxurl, { action: 'stop_thumbnail_regeneration', nonce: enhancedS3Ajax.nonce })
+                    .done(function(response) { if (response && response.success) { renderRegenState(response.data); } });
+            });
+            if ($regenStatus.length) {
+                pollRegen($regenStatus.data('status') === 'running');
+            }
+
             $('.toggle-iam-policy').on('click', function(e) {
                 e.preventDefault();
                 var target = $(this).data('target');
@@ -3061,7 +3335,9 @@ file_put_contents($temp_file, $test_content);
         $original_mime = get_post_mime_type($attachment_id);
         wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => 'image/webp'));
         update_attached_file($attachment_id, $target_path);
+        $this->internal_regeneration[$attachment_id] = true;
         $metadata = wp_generate_attachment_metadata($attachment_id, $target_path);
+        unset($this->internal_regeneration[$attachment_id]);
         if (is_wp_error($metadata) || empty($metadata)) {
             wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => $original_mime));
             update_attached_file($attachment_id, $original_path);
@@ -4639,6 +4915,27 @@ file_put_contents($temp_file, $test_content);
         
         return $url;
     }
+    /**
+     * Block writes of pre-WebP metadata (e.g. .png sizes) over an attachment already converted by the pipeline.
+     */
+    public function guard_stale_attachment_metadata($data, $attachment_id) {
+        if (!is_array($data) || empty($data['file']) || !get_post_meta($attachment_id, 'enhanced_s3_original_file', true)) {
+            return $data;
+        }
+
+        $attached_file = get_post_meta($attachment_id, '_wp_attached_file', true);
+        if (empty($attached_file) || $data['file'] === $attached_file) {
+            return $data;
+        }
+
+        $current = wp_get_attachment_metadata($attachment_id, true);
+        if (is_array($current) && ($current['file'] ?? '') === $attached_file) {
+            return array_merge($data, array_intersect_key($current, array_flip(array('file', 'width', 'height', 'filesize', 'sizes', 'original_image'))));
+        }
+
+        return $data;
+    }
+
     public function update_image_srcset($sources, $size_array, $image_src, $image_meta, $attachment_id) {
         if (empty($sources)) {
             return $sources;

@@ -21,6 +21,9 @@ class Enhanced_S3_SQS_Processor {
  * Queue Management Helper Class
  */
 class Enhanced_S3_Queue_Manager {
+    // Attachment IDs whose metadata is being regenerated internally; auto-upload hooks must ignore them.
+    public static $regenerating = array();
+
     private $aws_sdk;
     private $options;
     private $processor;
@@ -475,6 +478,8 @@ class Enhanced_S3_Queue_Manager {
             }
 
             $original_file_size = filesize($file_path);
+            $previous_path = $file_path;
+            $previous_metadata = wp_get_attachment_metadata($attachment_id, true);
             $pipeline = $this->prepare_image_for_delivery($attachment_id, $file_path);
             $file_path = $pipeline['file_path'];
 
@@ -518,6 +523,8 @@ class Enhanced_S3_Queue_Manager {
             update_post_meta($attachment_id, 'enhanced_s3_savings_percent', $pipeline['compression']['savings_percent']);
             update_post_meta($attachment_id, 'enhanced_s3_compression_service', 'tinypng');
             update_post_meta($attachment_id, 'enhanced_s3_converted_to_webp', current_time('mysql'));
+
+            $this->sync_thumbnail_urls($attachment_id, $previous_path, $previous_metadata, $s3_key);
             
             $completion_data = array(
                 's3_key' => $s3_key,
@@ -581,7 +588,9 @@ class Enhanced_S3_Queue_Manager {
         update_post_meta($attachment_id, 'enhanced_s3_reversal_url', esc_url_raw($local_url));
         wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => 'image/webp'));
         update_attached_file($attachment_id, $target_path);
+        self::$regenerating[$attachment_id] = true;
         $metadata = wp_generate_attachment_metadata($attachment_id, $target_path);
+        unset(self::$regenerating[$attachment_id]);
         if (is_wp_error($metadata) || empty($metadata)) {
             wp_update_post(array('ID' => $attachment_id, 'post_mime_type' => wp_check_filetype($original_path)['type']));
             update_attached_file($attachment_id, $original_path);
@@ -595,6 +604,150 @@ class Enhanced_S3_Queue_Manager {
             'local_url' => $local_url,
             'compression' => $compression
         );
+    }
+
+    /**
+     * Regenerate sizes for an already-offloaded image, re-upload them and rewrite stale thumbnail URLs.
+     * Returns 'fixed' or 'skipped'; throws on failure.
+     */
+    public function regenerate_attachment_thumbnails($attachment_id, $only_broken = true) {
+        $attachment_id = absint($attachment_id);
+        $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
+        if (empty($s3_key) || !wp_attachment_is_image($attachment_id)) {
+            return 'skipped';
+        }
+
+        $attached = get_post_meta($attachment_id, '_wp_attached_file', true);
+        $previous_metadata = wp_get_attachment_metadata($attachment_id, true);
+
+        if ($only_broken && !$this->has_stale_thumbnail_metadata($attached, $previous_metadata)) {
+            return 'skipped';
+        }
+
+        if (!function_exists('wp_generate_attachment_metadata')) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+
+        $file_path = get_attached_file($attachment_id);
+        if (empty($file_path)) {
+            throw new Exception('Attachment has no attached file.');
+        }
+
+        $downloaded = false;
+        if (!file_exists($file_path)) {
+            $bucket = get_post_meta($attachment_id, 'enhanced_s3_bucket', true) ?: $this->options['bucket_name'];
+            $download = $this->aws_sdk->download_file_from_s3($bucket, $s3_key, $file_path);
+            if (empty($download['success'])) {
+                throw new Exception('Unable to download image from S3: ' . ($download['error'] ?? $s3_key));
+            }
+            $downloaded = true;
+        }
+
+        self::$regenerating[$attachment_id] = true;
+        $metadata = wp_generate_attachment_metadata($attachment_id, $file_path);
+        unset(self::$regenerating[$attachment_id]);
+        if (is_wp_error($metadata) || empty($metadata)) {
+            throw new Exception('Thumbnail regeneration failed: ' . (is_wp_error($metadata) ? $metadata->get_error_message() : 'empty metadata'));
+        }
+        wp_update_attachment_metadata($attachment_id, $metadata);
+
+        if (!empty($this->options['upload_thumbnails'])) {
+            $this->upload_thumbnails($attachment_id, $file_path, $s3_key);
+        }
+
+        $uploads = wp_upload_dir();
+        $previous_path = !empty($previous_metadata['file'])
+            ? trailingslashit($uploads['basedir']) . $previous_metadata['file']
+            : $file_path;
+        $this->sync_thumbnail_urls($attachment_id, $previous_path, is_array($previous_metadata) ? $previous_metadata : array(), $s3_key);
+
+        // Don't leave newly downloaded copies behind when the library was offloaded without local files.
+        if ($downloaded) {
+            $dir = dirname($file_path);
+            foreach ((array) ($metadata['sizes'] ?? array()) as $size_info) {
+                if (!empty($size_info['file']) && file_exists($dir . '/' . $size_info['file'])) {
+                    @unlink($dir . '/' . $size_info['file']);
+                }
+            }
+            @unlink($file_path);
+        }
+
+        return 'fixed';
+    }
+
+    private function has_stale_thumbnail_metadata($attached, $metadata) {
+        if (!is_array($metadata) || empty($attached) || ($metadata['file'] ?? '') !== $attached) {
+            return true;
+        }
+
+        $extension = strtolower(pathinfo($attached, PATHINFO_EXTENSION));
+        foreach ((array) ($metadata['sizes'] ?? array()) as $size_info) {
+            if (!empty($size_info['file']) && strtolower(pathinfo($size_info['file'], PATHINFO_EXTENSION)) !== $extension) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Rewrite old (pre-WebP / pre-scaled) image and thumbnail URLs in content to the final CDN WebP URLs.
+     */
+    private function sync_thumbnail_urls($attachment_id, $previous_path, $previous_metadata, $s3_key) {
+        global $wpdb;
+
+        $metadata = wp_get_attachment_metadata($attachment_id, true);
+        if (!is_array($metadata) || !is_array($previous_metadata)) {
+            return;
+        }
+
+        $uploads = wp_upload_dir();
+        $old_relative = ltrim(str_replace(wp_normalize_path($uploads['basedir']), '', wp_normalize_path($previous_path)), '/');
+        $old_dir = dirname($old_relative);
+        $old_dir = ($old_dir === '.' || $old_dir === '') ? '' : $old_dir . '/';
+
+        $old_bases = array_unique(array_filter(array(
+            trailingslashit($uploads['baseurl']) . $old_dir,
+            $this->build_s3_url($this->options['s3_prefix'] . $old_dir)
+        )));
+
+        $main_url = $this->build_s3_url($s3_key);
+        $new_base = trailingslashit(dirname($main_url));
+        $new_sizes = isset($metadata['sizes']) && is_array($metadata['sizes']) ? $metadata['sizes'] : array();
+
+        // Old filename => new URL; sizes are matched by name, missing sizes fall back to the full image.
+        $file_map = array(basename($previous_path) => $main_url);
+        if (!empty($previous_metadata['original_image'])) {
+            $file_map[$previous_metadata['original_image']] = $main_url;
+        }
+        if (!empty($previous_metadata['sizes']) && is_array($previous_metadata['sizes'])) {
+            foreach ($previous_metadata['sizes'] as $size => $size_info) {
+                if (empty($size_info['file'])) {
+                    continue;
+                }
+                $file_map[$size_info['file']] = !empty($new_sizes[$size]['file']) ? $new_base . $new_sizes[$size]['file'] : $main_url;
+            }
+        }
+
+        foreach ($old_bases as $old_base) {
+            foreach ($file_map as $old_file => $new_url) {
+                $old_url = $old_base . $old_file;
+                if ($old_url === $new_url) {
+                    continue;
+                }
+                $like = '%' . $wpdb->esc_like($old_url) . '%';
+                $wpdb->query($wpdb->prepare(
+                    "UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s) WHERE post_content LIKE %s",
+                    $old_url, $new_url, $like
+                ));
+                $wpdb->query($wpdb->prepare(
+                    "UPDATE {$wpdb->posts} SET post_excerpt = REPLACE(post_excerpt, %s, %s) WHERE post_excerpt LIKE %s",
+                    $old_url, $new_url, $like
+                ));
+            }
+        }
+
+        clean_attachment_cache($attachment_id);
     }
 
     private function get_local_attachment_url($file_path) {

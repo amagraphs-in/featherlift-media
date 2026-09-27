@@ -31,6 +31,12 @@ FeatherLift Media (formerly Enhanced S3 Media Upload) is a WordPress plugin that
 5. GitHub Actions (`.github/workflows/release.yml`) builds the distributable ZIP and publishes it as a GitHub Release.
 
 ## Release Notes
+### v1.1.20 — 2026-09-27
+- Fix broken admin thumbnails after the TinyPNG/WebP/CloudFront pipeline by preventing stale pre-WebP metadata from overwriting the regenerated WebP sizes.
+- Rewrite old (PNG/JPEG and pre-scaled) thumbnail URLs in post content to the final CloudFront WebP URLs after each upload completes.
+- Prevent the pipeline's internal metadata regeneration from re-queuing the same attachment or re-running alt generation.
+- Add a background Regenerate Thumbnails tool (start/resume/stop with progress) for already-offloaded libraries, downloading missing files from S3 temporarily.
+
 ### v1.1.19 — 2026-09-26
 - Generate AI alt text automatically for future image uploads when AI alt generation is explicitly enabled, without duplicate calls during WebP metadata generation.
 - Parse CloudFront status/origin responses independent of XML namespace prefixes and clarify that the standalone probe path may return 403/404; use the combined real-object test to verify delivery.
