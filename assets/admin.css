@@ -11,6 +11,22 @@
     margin: 20px 0;
 }
 
+.aws-setup-section h2 {
+    margin-top: 0;
+}
+
+.enhanced-s3-aws-resource-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px 24px;
+    padding-left: 24px;
+}
+
+.enhanced-s3-step-locked {
+    background: #f6f7f7;
+    border-left: 4px solid #8c8f94;
+}
+
 .aws-setup-status {
     font-weight: 600;
     margin-bottom: 10px;

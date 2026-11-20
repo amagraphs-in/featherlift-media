@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.23
+ * Version: 1.1.24
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.23';
+    private $version = '1.1.24';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -923,7 +923,7 @@ class Enhanced_S3_Media_Upload {
 
         add_settings_section(
             'enhanced_s3_optimize_section',
-            'Optimize & Resize',
+            'Step 2: Compression & Resize',
             array($this, 'optimize_section_callback'),
             'enhanced-s3-settings'
         );
@@ -957,17 +957,8 @@ class Enhanced_S3_Media_Upload {
         );
 
         $offload_fields = array(
-            'access_key'                => 'AWS Access Key',
-            'secret_key'                => 'AWS Secret Key',
-            'region'                    => 'AWS Region',
-            'bucket_name'               => 'Bucket name',
-            'bucket_autoname_strategy'  => 'Bucket naming strategy',
-            's3_prefix'                 => 'Upload prefix',
-            'use_cloudfront'            => 'Enable CloudFront CDN',
             'serve_media_from_cdn'      => 'Serve media from CDN',
             'serve_static_assets_from_cdn' => 'Serve scripts and styles from CDN',
-            'cloudfront_domain'         => 'CloudFront domain (manual)',
-            'cloudfront_distribution_id'=> 'CloudFront distribution ID',
             'upload_thumbnails'         => 'Upload generated thumbnail sizes',
             'auto_delete_local'         => 'Remove local copies after upload'
         );
@@ -1851,10 +1842,9 @@ class Enhanced_S3_Media_Upload {
                 <div>
                     <h2><?php esc_html_e('Quick Setup Instructions', 'enhanced-s3'); ?></h2>
                     <ol>
-                        <li><?php esc_html_e('Enter AWS credentials under External Storage & CDN and save the settings.', 'enhanced-s3'); ?></li>
-                        <li><?php esc_html_e('Use Media Workflow Intent to decide whether you want optimization, offloading, or both.', 'enhanced-s3'); ?></li>
-                        <li><?php esc_html_e('Run Optimize & Resize rules before queuing uploads.', 'enhanced-s3'); ?></li>
-                        <li><?php esc_html_e('Once AWS is ready, manage automation and queue uploads from the FeatherLite box.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('Enter AWS credentials and region in Step 1 to create S3, SQS, and CloudFront resources.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('After AWS setup, configure compression and optional TinyPNG in Step 2.', 'enhanced-s3'); ?></li>
+                        <li><?php esc_html_e('Then choose upload automation and delivery behavior below.', 'enhanced-s3'); ?></li>
                     </ol>
                 </div>
                 <div class="enhanced-s3-instructions-policy">
@@ -1898,6 +1888,35 @@ echo esc_html(wp_json_encode(array(
                 </div>
             </div>
 
+            <?php $aws_resources_ready = $aws_ready && !empty($this->bucket_name) && !empty($this->sqs_queue_url) && !empty($this->cloudfront_domain); ?>
+            <section class="aws-setup-section enhanced-s3-setup-step" id="aws-resources-step">
+                <h2><?php esc_html_e('Step 1: Enable AWS Resources', 'enhanced-s3'); ?></h2>
+                <p class="description"><?php esc_html_e('Enter your AWS access key, secret key, and region. FeatherLift will create and configure the site S3 bucket, SQS queue, and CloudFront distribution. These resource settings are managed here and are not changed by the other settings below.', 'enhanced-s3'); ?></p>
+                <form id="enhanced-s3-aws-setup-form">
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><label><?php esc_html_e('AWS Access Key', 'enhanced-s3'); ?></label></th>
+                            <td><?php $this->access_key_field(); ?></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label><?php esc_html_e('AWS Secret Key', 'enhanced-s3'); ?></label></th>
+                            <td><?php $this->secret_key_field(); ?></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><label for="enhanced-s3-aws-region"><?php esc_html_e('AWS Region', 'enhanced-s3'); ?></label></th>
+                            <td><?php $this->region_field(); ?></td>
+                        </tr>
+                    </table>
+                </form>
+                <ol class="enhanced-s3-aws-resource-list">
+                    <li><?php echo !empty($this->bucket_name) ? esc_html__('S3 bucket enabled', 'enhanced-s3') : esc_html__('S3 bucket will be created', 'enhanced-s3'); ?></li>
+                    <li><?php echo !empty($this->sqs_queue_url) ? esc_html__('SQS queue enabled', 'enhanced-s3') : esc_html__('SQS queue will be created', 'enhanced-s3'); ?></li>
+                    <li><?php echo !empty($this->cloudfront_domain) ? esc_html__('CloudFront distribution configured', 'enhanced-s3') : esc_html__('CloudFront distribution will be created', 'enhanced-s3'); ?></li>
+                </ol>
+                <p><button type="button" id="setup-aws-resources" class="button button-primary"><?php echo $aws_resources_ready ? esc_html__('Verify AWS Resources', 'enhanced-s3') : esc_html__('Save Credentials & Enable AWS Resources', 'enhanced-s3'); ?></button></p>
+                <div id="setup-status"></div>
+            </section>
+
             <div class="current-config">
                 <h3><?php esc_html_e('Current Configuration', 'enhanced-s3'); ?></h3>
                 <ul class="current-config-list">
@@ -1924,8 +1943,8 @@ echo esc_html(wp_json_encode(array(
                     echo '<div class="notice notice-info intent-onboarding"><p>Select at least one option under "What should this plugin do?" and save. Optimization and offload settings will unlock after you confirm your intent.</p></div>';
                 }
                 $ordered_sections = array(
-                    'enhanced_s3_intent_section',
                     'enhanced_s3_optimize_section',
+                    'enhanced_s3_intent_section',
                     'enhanced_s3_automation_section',
                     'enhanced_s3_offload_section'
                 );
@@ -1940,13 +1959,15 @@ echo esc_html(wp_json_encode(array(
                     if ($section_id === 'enhanced_s3_ai_section') {
                         continue;
                     }
-                    if ($section_id === 'enhanced_s3_optimize_section' && (!$this->intent_committed || !$this->optimize_media)) {
+                    if ($section_id === 'enhanced_s3_optimize_section' && !$aws_resources_ready) {
+                        echo '<div class="enhanced-s3-card enhanced-s3-step-locked"><h2>' . esc_html__('Step 2: Compression & Resize', 'enhanced-s3') . '</h2><p>' . esc_html__('Complete Step 1 to unlock compression settings and TinyPNG configuration.', 'enhanced-s3') . '</p></div>';
                         continue;
                     }
                     if ($section_id === 'enhanced_s3_offload_section' && (!$this->intent_committed || !$this->offload_media)) {
                         continue;
                     }
 
+                    $section = $sections[$section_id];
                     echo '<div class="enhanced-s3-card">';
                     if (!empty($section['title'])) {
                         echo '<h2>' . esc_html($section['title']) . '</h2>';
@@ -1985,14 +2006,12 @@ echo esc_html(wp_json_encode(array(
             </form>
             
             <div class="aws-setup-section">
-                <h3><?php esc_html_e('AWS Resource Management', 'enhanced-s3'); ?></h3>
+                <h3><?php esc_html_e('AWS Management', 'enhanced-s3'); ?></h3>
                 <?php $is_setup = $this->bucket_name === $this->generate_bucket_name() && !empty($this->sqs_queue_url) && !empty($this->cloudfront_domain); ?>
-                <p class="description"><?php esc_html_e('Set up this site’s S3 bucket, public media access, SQS queue, and CloudFront delivery together.', 'enhanced-s3'); ?></p>
-                <p><button type="button" id="setup-aws-resources" class="button button-primary" <?php disabled(!$aws_ready); ?>><?php echo $is_setup ? esc_html__('Verify AWS Setup', 'enhanced-s3') : esc_html__('Set Up AWS', 'enhanced-s3'); ?></button></p>
                 <?php if (!$aws_ready): ?>
                     <p class="notice notice-error inline"><?php echo $aws_credentials_unreadable
-                        ? esc_html__('Saved AWS credentials cannot be decrypted. Enable PHP OpenSSL, then re-enter and save both AWS keys.', 'enhanced-s3')
-                        : esc_html__('Enter and save both AWS keys and a region above to enable one-click setup.', 'enhanced-s3'); ?></p>
+                        ? esc_html__('Saved AWS credentials cannot be decrypted. Re-enter them in Step 1.', 'enhanced-s3')
+                        : esc_html__('Enter both AWS keys and a region in Step 1 to enable resource management.', 'enhanced-s3'); ?></p>
                 <?php endif; ?>
                 <?php if ($is_setup): ?>
                     <p class="aws-setup-status aws-setup-status--ready">&#10003; <?php esc_html_e('AWS resources are configured and ready.', 'enhanced-s3'); ?></p>
@@ -2044,7 +2063,6 @@ echo esc_html(wp_json_encode(array(
                         <button type="button" id="test-sqs-connection" class="button button-secondary" <?php disabled(!$aws_ready); ?>><?php esc_html_e('Test SQS Connection', 'enhanced-s3'); ?></button>
                     <?php endif; ?>
                 </details>
-                <div id="setup-status"></div>
                 <div id="connection-result"></div>
             </div>
         </div>
@@ -2795,11 +2813,13 @@ echo esc_html(wp_json_encode(array(
             if (!empty($_POST['settings']) && is_string($_POST['settings'])) {
                 parse_str(wp_unslash($_POST['settings']), $submitted);
                 if (!empty($submitted['enhanced_s3_settings']) && is_array($submitted['enhanced_s3_settings'])) {
-                    $submitted_settings = $submitted['enhanced_s3_settings'];
+                    $submitted_values = $submitted['enhanced_s3_settings'];
+                    $current_settings = get_option('enhanced_s3_settings', array());
+                    $submitted_settings = array_merge(is_array($current_settings) ? $current_settings : array(), $submitted_values);
                     $sanitized_settings = $this->sanitize_settings($submitted_settings);
                     foreach (array('access_key', 'secret_key') as $credential_field) {
-                        $incoming_credential = isset($submitted_settings[$credential_field])
-                            ? sanitize_text_field(trim($submitted_settings[$credential_field]))
+                        $incoming_credential = isset($submitted_values[$credential_field])
+                            ? sanitize_text_field(trim($submitted_values[$credential_field]))
                             : '';
                         if ($incoming_credential !== ''
                             && $this->decrypt_sensitive_value($sanitized_settings[$credential_field] ?? '') !== $incoming_credential) {
@@ -3911,7 +3931,7 @@ file_put_contents($temp_file, $test_content);
             return 'AWS region is missing. Select a region and save the settings.';
         }
 
-        return 'AWS credentials are unavailable. Re-enter and save the access key and secret key.';
+        return 'The saved AWS credentials are still encrypted after decoding. Re-enter the plain access key and secret key, then save them again.';
     }
     
     private function get_s3_endpoint($region) {
@@ -3976,32 +3996,39 @@ file_put_contents($temp_file, $test_content);
     }
 
     private function decrypt_sensitive_value($value) {
-        if ($value === '') {
-            return $value;
+        $value = (string) $value;
+        for ($depth = 0; $depth < 4; $depth++) {
+            if ($value === '') {
+                return '';
+            }
+
+            $is_current_format = strpos($value, 'enc2::') === 0;
+            $is_legacy_format = strpos($value, 'enc::') === 0;
+            if (!$is_current_format && !$is_legacy_format) {
+                return $value;
+            }
+
+            if (!function_exists('openssl_decrypt')) {
+                return '';
+            }
+
+            $payload = base64_decode(substr($value, $is_current_format ? 6 : 5), true);
+            if ($payload === false || strlen($payload) <= 16) {
+                return '';
+            }
+
+            $iv = substr($payload, 0, 16);
+            $ciphertext = substr($payload, 16);
+            $key = $is_current_format ? $this->get_persistent_encryption_key() : $this->get_encryption_key();
+            $decrypted = openssl_decrypt($ciphertext, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+            if ($decrypted === false) {
+                return '';
+            }
+
+            $value = $decrypted;
         }
 
-        $is_current_format = strpos($value, 'enc2::') === 0;
-        $is_legacy_format = strpos($value, 'enc::') === 0;
-        if (!$is_current_format && !$is_legacy_format) {
-            return $value;
-        }
-
-        if (!function_exists('openssl_decrypt')) {
-            return '';
-        }
-
-        $payload = base64_decode(substr($value, $is_current_format ? 6 : 5), true);
-        if ($payload === false || strlen($payload) <= 16) {
-            return '';
-        }
-
-        $iv = substr($payload, 0, 16);
-        $ciphertext = substr($payload, 16);
-        $key = $is_current_format ? $this->get_persistent_encryption_key() : $this->get_encryption_key();
-
-        $decrypted = openssl_decrypt($ciphertext, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
-
-        return $decrypted !== false ? $decrypted : '';
+        return (strpos($value, 'enc::') === 0 || strpos($value, 'enc2::') === 0) ? '' : $value;
     }
 
     private function get_persistent_encryption_key() {
@@ -4523,7 +4550,7 @@ file_put_contents($temp_file, $test_content);
     }
 
     public function offload_section_callback() {
-        echo '<p>Provide the credentials or manual endpoints needed to keep media on S3 and optionally accelerate through CloudFront. You can let the plugin auto-provision resources or plug in existing infrastructure.</p>';
+        echo '<p>Choose how provisioned S3 and CloudFront resources deliver media and thumbnail sizes. AWS credentials, bucket, queue, and distribution are managed in Step 1.</p>';
     }
 
     public function automation_section_callback() {
@@ -4546,7 +4573,7 @@ file_put_contents($temp_file, $test_content);
         echo '<input type="hidden" name="enhanced_s3_settings[access_key_masked]" value="' . ($has_value ? '1' : '0') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[access_key_clear]" value="0">';
         if ($has_value) {
-            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and save changes.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="access_key">Remove stored key</button></p>';
+            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and run Step 1.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="access_key">Remove stored key</button></p>';
         } else {
             echo '<p class="description">Enter your AWS access key ID</p>';
         }
@@ -4559,7 +4586,7 @@ file_put_contents($temp_file, $test_content);
         echo '<input type="hidden" name="enhanced_s3_settings[secret_key_masked]" value="' . ($has_value ? '1' : '0') . '">';
         echo '<input type="hidden" name="enhanced_s3_settings[secret_key_clear]" value="0">';
         if ($has_value) {
-            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and save changes.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="secret_key">Remove stored key</button></p>';
+            echo '<p class="description">' . ($has_usable_value ? 'Stored securely. Leave blank to keep.' : 'Stored value cannot be read; re-enter the key and run Step 1.') . ' <button type="button" class="button-link enhanced-s3-clear-secret" data-field="secret_key">Remove stored key</button></p>';
         } else {
             echo '<p class="description">Enter your AWS secret access key</p>';
         }
@@ -4586,7 +4613,7 @@ file_put_contents($temp_file, $test_content);
             'sa-east-1' => 'South America (São Paulo)'
         );
         
-        echo '<select name="enhanced_s3_settings[region]">';
+        echo '<select id="enhanced-s3-aws-region" name="enhanced_s3_settings[region]">';
         foreach ($regions as $code => $name) {
             echo '<option value="' . esc_attr($code) . '" ' . selected($value, $code, false) . '>' . esc_html($name) . '</option>';
         }
@@ -4946,7 +4973,11 @@ file_put_contents($temp_file, $test_content);
         );
         
         foreach ($checkbox_fields as $field) {
-            $new_settings[$field] = isset($settings[$field]) && $settings[$field] === '1' ? '1' : '';
+            if ($field === 'use_cloudfront' && !isset($settings[$field])) {
+                $new_settings[$field] = $existing_settings[$field] ?? '';
+            } else {
+                $new_settings[$field] = isset($settings[$field]) && $settings[$field] === '1' ? '1' : '';
+            }
         }
         $new_settings['auto_delete_local'] = '';
 
