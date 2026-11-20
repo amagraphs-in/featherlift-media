@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.20
+ * Version: 1.1.21
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.20';
+    private $version = '1.1.21';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -214,6 +214,8 @@ class Enhanced_S3_Media_Upload {
                 $runtime[$field] = $this->get_option($field, '');
             }
         }
+        $runtime['serve_media_from_cdn'] = $this->serve_media_from_cdn;
+        $runtime['upload_thumbnails'] = (bool) $this->upload_thumbnails;
 
         return $runtime;
     }
@@ -276,6 +278,7 @@ class Enhanced_S3_Media_Upload {
         
         // URL replacement hooks
         add_filter('wp_get_attachment_url', array($this, 'get_attachment_url'), 10, 2);
+        add_filter('image_downsize', array($this, 'update_image_downsize'), 10, 3);
         add_filter('wp_update_attachment_metadata', array($this, 'guard_stale_attachment_metadata'), 99, 2);
         add_filter('wp_calculate_image_srcset', array($this, 'update_image_srcset'), 10, 5);
         add_filter('script_loader_src', array($this, 'get_static_asset_url'), 10, 2);
@@ -356,6 +359,8 @@ class Enhanced_S3_Media_Upload {
                 'total' => $total,
                 'processed' => 0,
                 'fixed' => 0,
+                'synced' => 0,
+                'urls_updated' => 0,
                 'skipped' => 0,
                 'failed' => 0,
                 'errors' => array(),
@@ -417,6 +422,8 @@ class Enhanced_S3_Media_Upload {
             'total' => 0,
             'processed' => 0,
             'fixed' => 0,
+            'synced' => 0,
+            'urls_updated' => 0,
             'skipped' => 0,
             'failed' => 0,
             'errors' => array(),
@@ -470,7 +477,9 @@ class Enhanced_S3_Media_Upload {
             foreach ($ids as $id) {
                 try {
                     $result = $this->queue_manager->regenerate_attachment_thumbnails($id, !empty($state['only_broken']));
-                    $state[$result === 'fixed' ? 'fixed' : 'skipped']++;
+                    $status = $result['status'] ?? 'skipped';
+                    $state[in_array($status, array('fixed', 'synced'), true) ? $status : 'skipped']++;
+                    $state['urls_updated'] += (int) ($result['updated'] ?? 0);
                 } catch (Exception $e) {
                     $state['failed']++;
                     $state['errors'][] = 'ID ' . $id . ': ' . $e->getMessage();
@@ -1997,7 +2006,7 @@ echo esc_html(wp_json_encode(array(
                     <?php $regen_state = $this->get_thumbnail_regeneration_state(); ?>
                     <div class="reset-options" id="thumbnail-regeneration">
                         <h4><?php esc_html_e('Regenerate Thumbnails', 'enhanced-s3'); ?></h4>
-                        <p class="description"><?php esc_html_e('Rebuilds thumbnail sizes for offloaded images from the delivered WebP file, uploads them to S3, and rewrites old thumbnail URLs in post content. Runs in the background in small batches; missing local files are downloaded from S3 temporarily.', 'enhanced-s3'); ?></p>
+                        <p class="description"><?php esc_html_e('Repairs offloaded thumbnails and updates saved image URLs in post content, ACF fields, builder data, and site options. Healthy thumbnails are not downloaded or rebuilt when the mismatch-only option is selected. Runs in background batches.', 'enhanced-s3'); ?></p>
                         <p><label><input type="checkbox" id="thumb-regen-only-broken" <?php checked(!empty($regen_state['only_broken'])); ?>> <?php esc_html_e('Only fix images with mismatched thumbnails (recommended)', 'enhanced-s3'); ?></label></p>
                         <p>
                             <button type="button" id="thumb-regen-start" class="button button-primary"><?php esc_html_e('Start Regeneration', 'enhanced-s3'); ?></button>
@@ -2038,7 +2047,7 @@ echo esc_html(wp_json_encode(array(
                 var total = parseInt(state.total, 10) || 0;
                 var processed = parseInt(state.processed, 10) || 0;
                 var pct = total ? Math.min(100, Math.round(processed / total * 100)) : 0;
-                var $p = $('<p>').text('Status: ' + state.status + ' — ' + processed + ' / ' + total + ' (' + pct + '%). Fixed: ' + state.fixed + ', skipped: ' + state.skipped + ', failed: ' + state.failed + '.');
+                var $p = $('<p>').text('Status: ' + state.status + ' — ' + processed + ' / ' + total + ' (' + pct + '%). Regenerated: ' + state.fixed + ', URL-only sync: ' + (state.synced || 0) + ', records updated: ' + (state.urls_updated || 0) + ', skipped: ' + state.skipped + ', failed: ' + state.failed + '.');
                 $regenStatus.empty().append($p);
                 if (state.errors && state.errors.length) {
                     var $list = $('<ul class="thumb-regen-errors">');
@@ -4936,6 +4945,34 @@ file_put_contents($temp_file, $test_content);
         return $data;
     }
 
+    public function update_image_downsize($image, $attachment_id, $size) {
+        if (!$this->serve_media_from_cdn || empty($image[0])) {
+            return $image;
+        }
+
+        $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
+        if (empty($s3_key)) {
+            return $image;
+        }
+
+        if (empty($this->upload_thumbnails)) {
+            $image[0] = $this->get_s3_url($s3_key);
+            return $image;
+        }
+
+        $filename = basename(wp_parse_url($image[0], PHP_URL_PATH));
+        if ($filename === '') {
+            return $image;
+        }
+
+        $cdn_url = $this->get_s3_url(trim(dirname($s3_key), '/') . '/' . $filename);
+        if (!empty($cdn_url)) {
+            $image[0] = $cdn_url;
+        }
+
+        return $image;
+    }
+
     public function update_image_srcset($sources, $size_array, $image_src, $image_meta, $attachment_id) {
         if (empty($sources)) {
             return $sources;
@@ -4945,6 +4982,14 @@ file_put_contents($temp_file, $test_content);
         $stored_url = get_post_meta($attachment_id, 'enhanced_s3_url', true);
         
         if ($this->serve_media_from_cdn && !empty($s3_key)) {
+            if (empty($this->upload_thumbnails)) {
+                $full_url = $this->get_s3_url($s3_key);
+                foreach ($sources as $width => $source) {
+                    $sources[$width]['url'] = $full_url;
+                }
+                return $sources;
+            }
+
             $s3_dir = dirname($s3_key);
             foreach ($sources as $width => $source) {
                 $filename = basename($source['url']);

@@ -391,7 +391,6 @@ class Enhanced_S3_Queue_Manager {
                     $processed++;
                 }
             } while (!empty($result['messages']) && $processed < 100);
-            
         } catch (Exception $e) {
             error_log('FeatherLift Media SQS Processor Error: ' . $e->getMessage());
         }
@@ -614,14 +613,17 @@ class Enhanced_S3_Queue_Manager {
         $attachment_id = absint($attachment_id);
         $s3_key = get_post_meta($attachment_id, 'enhanced_s3_key', true);
         if (empty($s3_key) || !wp_attachment_is_image($attachment_id)) {
-            return 'skipped';
+            return array('status' => 'skipped', 'updated' => 0);
         }
 
         $attached = get_post_meta($attachment_id, '_wp_attached_file', true);
         $previous_metadata = wp_get_attachment_metadata($attachment_id, true);
 
         if ($only_broken && !$this->has_stale_thumbnail_metadata($attached, $previous_metadata)) {
-            return 'skipped';
+            $uploads = wp_upload_dir();
+            $current_path = trailingslashit($uploads['basedir']) . $attached;
+            $updated = $this->sync_thumbnail_urls($attachment_id, $current_path, $previous_metadata, $s3_key);
+            return array('status' => $updated ? 'synced' : 'skipped', 'updated' => $updated);
         }
 
         if (!function_exists('wp_generate_attachment_metadata')) {
@@ -659,7 +661,7 @@ class Enhanced_S3_Queue_Manager {
         $previous_path = !empty($previous_metadata['file'])
             ? trailingslashit($uploads['basedir']) . $previous_metadata['file']
             : $file_path;
-        $this->sync_thumbnail_urls($attachment_id, $previous_path, is_array($previous_metadata) ? $previous_metadata : array(), $s3_key);
+        $updated = $this->sync_thumbnail_urls($attachment_id, $previous_path, $previous_metadata, $s3_key);
 
         // Don't leave newly downloaded copies behind when the library was offloaded without local files.
         if ($downloaded) {
@@ -672,7 +674,7 @@ class Enhanced_S3_Queue_Manager {
             @unlink($file_path);
         }
 
-        return 'fixed';
+        return array('status' => 'fixed', 'updated' => $updated);
     }
 
     private function has_stale_thumbnail_metadata($attached, $metadata) {
@@ -694,11 +696,16 @@ class Enhanced_S3_Queue_Manager {
      * Rewrite old (pre-WebP / pre-scaled) image and thumbnail URLs in content to the final CDN WebP URLs.
      */
     private function sync_thumbnail_urls($attachment_id, $previous_path, $previous_metadata, $s3_key) {
-        global $wpdb;
+        if (empty($this->options['serve_media_from_cdn'])) {
+            return 0;
+        }
 
         $metadata = wp_get_attachment_metadata($attachment_id, true);
-        if (!is_array($metadata) || !is_array($previous_metadata)) {
-            return;
+        if (!is_array($metadata)) {
+            return 0;
+        }
+        if (!is_array($previous_metadata)) {
+            $previous_metadata = array();
         }
 
         $uploads = wp_upload_dir();
@@ -710,44 +717,202 @@ class Enhanced_S3_Queue_Manager {
             trailingslashit($uploads['baseurl']) . $old_dir,
             $this->build_s3_url($this->options['s3_prefix'] . $old_dir)
         )));
+        $base_variations = array();
+        foreach ($old_bases as $old_base) {
+            if (strpos($old_base, 'https://') === 0) {
+                $base_variations[] = str_replace('https://', 'http://', $old_base);
+                $base_variations[] = str_replace('https://', '//', $old_base);
+            }
+        }
+        $old_bases = array_values(array_unique(array_merge($old_bases, $base_variations)));
 
         $main_url = $this->build_s3_url($s3_key);
         $new_base = trailingslashit(dirname($main_url));
         $new_sizes = isset($metadata['sizes']) && is_array($metadata['sizes']) ? $metadata['sizes'] : array();
 
         // Old filename => new URL; sizes are matched by name, missing sizes fall back to the full image.
-        $file_map = array(basename($previous_path) => $main_url);
-        if (!empty($previous_metadata['original_image'])) {
-            $file_map[$previous_metadata['original_image']] = $main_url;
+        $file_map = array();
+        $this->add_thumbnail_file_aliases($file_map, basename($previous_path), $main_url);
+        if (!empty($metadata['file'])) {
+            $this->add_thumbnail_file_aliases($file_map, basename($metadata['file']), $main_url);
         }
-        if (!empty($previous_metadata['sizes']) && is_array($previous_metadata['sizes'])) {
-            foreach ($previous_metadata['sizes'] as $size => $size_info) {
-                if (empty($size_info['file'])) {
-                    continue;
+        foreach (array($previous_metadata, $metadata) as $source_metadata) {
+            if (!empty($source_metadata['original_image'])) {
+                $this->add_thumbnail_file_aliases($file_map, $source_metadata['original_image'], $main_url);
+            }
+        }
+        foreach (array($previous_metadata, $metadata) as $source_metadata) {
+            if (!empty($source_metadata['sizes']) && is_array($source_metadata['sizes'])) {
+                foreach ($source_metadata['sizes'] as $size => $size_info) {
+                    if (empty($size_info['file'])) {
+                        continue;
+                    }
+                    $new_file = !empty($this->options['upload_thumbnails']) && !empty($new_sizes[$size]['file'])
+                        ? $new_sizes[$size]['file']
+                        : basename($metadata['file'] ?? $previous_path);
+                    $this->add_thumbnail_file_aliases($file_map, $size_info['file'], $new_base . $new_file);
                 }
-                $file_map[$size_info['file']] = !empty($new_sizes[$size]['file']) ? $new_base . $new_sizes[$size]['file'] : $main_url;
             }
         }
 
+        $url_map = array();
         foreach ($old_bases as $old_base) {
             foreach ($file_map as $old_file => $new_url) {
                 $old_url = $old_base . $old_file;
                 if ($old_url === $new_url) {
                     continue;
                 }
-                $like = '%' . $wpdb->esc_like($old_url) . '%';
-                $wpdb->query($wpdb->prepare(
-                    "UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s) WHERE post_content LIKE %s",
-                    $old_url, $new_url, $like
-                ));
-                $wpdb->query($wpdb->prepare(
-                    "UPDATE {$wpdb->posts} SET post_excerpt = REPLACE(post_excerpt, %s, %s) WHERE post_excerpt LIKE %s",
-                    $old_url, $new_url, $like
-                ));
+                $this->add_url_storage_forms($url_map, $old_url, $new_url);
             }
         }
 
+        $updated = $this->replace_urls_in_storage($url_map);
         clean_attachment_cache($attachment_id);
+        return $updated;
+    }
+
+    private function add_thumbnail_file_aliases(&$file_map, $old_file, $new_url) {
+        if (empty($old_file) || empty($new_url)) {
+            return;
+        }
+
+        $file_map[$old_file] = $new_url;
+        $extension = pathinfo($old_file, PATHINFO_EXTENSION);
+        $stem = $extension === '' ? $old_file : substr($old_file, 0, -strlen($extension) - 1);
+        foreach (array('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif') as $image_extension) {
+            $file_map[$stem . '.' . $image_extension] = $new_url;
+        }
+    }
+
+    private function add_url_storage_forms(&$url_map, $old_url, $new_url) {
+        $old_forms = array_unique(array(
+            $old_url,
+            str_replace('/', '\\/', $old_url),
+            rawurlencode($old_url),
+            urlencode($old_url)
+        ));
+        $new_forms = array(
+            $new_url,
+            str_replace('/', '\\/', $new_url),
+            rawurlencode($new_url),
+            urlencode($new_url)
+        );
+
+        foreach ($old_forms as $index => $old_form) {
+            if ($old_form !== $new_forms[$index]) {
+                $url_map[$old_form] = $new_forms[$index];
+            }
+        }
+    }
+
+    private function replace_urls_in_storage($url_map) {
+        global $wpdb;
+
+        if (empty($url_map)) {
+            return 0;
+        }
+
+        $patterns = array();
+        foreach (array_keys($url_map) as $old_url) {
+            $stem = preg_replace('/\.[^\.\/\\\\]+$/', '', $old_url);
+            if ($stem !== $old_url) {
+                $patterns[] = '%' . $wpdb->esc_like($stem) . '.%';
+            } else {
+                $patterns[] = '%' . $wpdb->esc_like($old_url) . '%';
+            }
+        }
+        $patterns = array_values(array_unique($patterns));
+        $where = implode(' OR ', array_fill(0, count($patterns), '%s'));
+        $updated = 0;
+
+        $post_query = "SELECT ID, post_content, post_excerpt FROM {$wpdb->posts} WHERE post_content LIKE {$where} OR post_excerpt LIKE {$where}";
+        $post_rows = $wpdb->get_results(call_user_func_array(array($wpdb, 'prepare'), array_merge(array($post_query), $patterns, $patterns)));
+        foreach ($post_rows as $row) {
+            $content = $this->replace_urls_in_value($row->post_content, $url_map);
+            $excerpt = $this->replace_urls_in_value($row->post_excerpt, $url_map);
+            if ($content !== $row->post_content || $excerpt !== $row->post_excerpt) {
+                $wpdb->update($wpdb->posts, array('post_content' => $content, 'post_excerpt' => $excerpt), array('ID' => $row->ID), array('%s', '%s'), array('%d'));
+                clean_post_cache($row->ID);
+                $updated++;
+            }
+        }
+
+        $tables = array(
+            array($wpdb->postmeta, 'meta_id', 'meta_value', 'post_id', 'post'),
+            array($wpdb->termmeta, 'meta_id', 'meta_value', 'term_id', 'term'),
+            array($wpdb->usermeta, 'umeta_id', 'meta_value', 'user_id', 'user'),
+            array($wpdb->options, 'option_id', 'option_value', 'option_name', 'option')
+        );
+
+        foreach ($tables as $table_info) {
+            list($table, $id_column, $value_column, $owner_column, $cache_type) = $table_info;
+            $query = "SELECT {$id_column} AS row_id, {$value_column} AS row_value, {$owner_column} AS owner_id FROM {$table} WHERE {$value_column} LIKE {$where}";
+            $rows = $wpdb->get_results(call_user_func_array(array($wpdb, 'prepare'), array_merge(array($query), $patterns)));
+
+            foreach ($rows as $row) {
+                $value = $this->replace_urls_in_value($row->row_value, $url_map);
+                if ($value === $row->row_value) {
+                    continue;
+                }
+
+                $wpdb->update($table, array($value_column => $value), array($id_column => $row->row_id), array('%s'), array('%d'));
+                if ($cache_type === 'post') {
+                    wp_cache_delete($row->owner_id, 'post_meta');
+                } elseif ($cache_type === 'term') {
+                    wp_cache_delete($row->owner_id, 'term_meta');
+                } elseif ($cache_type === 'user') {
+                    wp_cache_delete($row->owner_id, 'user_meta');
+                } else {
+                    wp_cache_delete($row->owner_id, 'options');
+                    wp_cache_delete('alloptions', 'options');
+                    wp_cache_delete('notoptions', 'options');
+                }
+                $updated++;
+            }
+        }
+
+        return $updated;
+    }
+
+    private function replace_urls_in_value($value, $url_map) {
+        if (is_string($value)) {
+            if (is_serialized($value)) {
+                $unserialized = @unserialize($value, array('allowed_classes' => false));
+                if ($unserialized === false && $value !== 'b:0;') {
+                    return $value;
+                }
+                if ($this->contains_serialized_object($unserialized)) {
+                    return $value;
+                }
+                return serialize($this->replace_urls_in_value($unserialized, $url_map));
+            }
+            return strtr($value, $url_map);
+        }
+
+        if (is_array($value)) {
+            $replaced = array();
+            foreach ($value as $key => $item) {
+                $new_key = is_string($key) ? strtr($key, $url_map) : $key;
+                $replaced[$new_key] = $this->replace_urls_in_value($item, $url_map);
+            }
+            return $replaced;
+        }
+
+        return $value;
+    }
+
+    private function contains_serialized_object($value) {
+        if (is_object($value)) {
+            return true;
+        }
+        if (is_array($value)) {
+            foreach ($value as $item) {
+                if ($this->contains_serialized_object($item)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private function get_local_attachment_url($file_path) {
@@ -1229,35 +1394,9 @@ class Enhanced_S3_Queue_Manager {
      * Perform URL replacement
      */
     private function perform_url_replacement($old_url, $new_url) {
-        global $wpdb;
-        
-        // Replace in post content
-        $wpdb->query($wpdb->prepare("
-            UPDATE {$wpdb->posts} 
-            SET post_content = REPLACE(post_content, %s, %s)
-            WHERE post_content LIKE %s
-        ", $old_url, $new_url, '%' . $wpdb->esc_like($old_url) . '%'));
-        
-        // Replace in post excerpts
-        $wpdb->query($wpdb->prepare("
-            UPDATE {$wpdb->posts} 
-            SET post_excerpt = REPLACE(post_excerpt, %s, %s)
-            WHERE post_excerpt LIKE %s
-        ", $old_url, $new_url, '%' . $wpdb->esc_like($old_url) . '%'));
-        
-        // Replace in post meta
-        $wpdb->query($wpdb->prepare("
-            UPDATE {$wpdb->postmeta} 
-            SET meta_value = REPLACE(meta_value, %s, %s)
-            WHERE meta_value LIKE %s
-        ", $old_url, $new_url, '%' . $wpdb->esc_like($old_url) . '%'));
-        
-        // Replace in options
-        $wpdb->query($wpdb->prepare("
-            UPDATE {$wpdb->options} 
-            SET option_value = REPLACE(option_value, %s, %s)
-            WHERE option_value LIKE %s
-        ", $old_url, $new_url, '%' . $wpdb->esc_like($old_url) . '%'));
+        $url_map = array();
+        $this->add_url_storage_forms($url_map, $old_url, $new_url);
+        $this->replace_urls_in_storage($url_map);
     }
 
     /**
