@@ -375,7 +375,8 @@
                 type: 'POST',
                 data: {
                     action: 'setup_aws_resources',
-                    nonce: enhancedS3Ajax.nonce
+                    nonce: enhancedS3Ajax.nonce,
+                    settings: $('#enhanced-s3-settings-form').serialize()
                 },
                 success: function(response) {
                     if (response.success) {

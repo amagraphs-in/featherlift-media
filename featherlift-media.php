@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.21
+ * Version: 1.1.22
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.21';
+    private $version = '1.1.22';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -151,7 +151,7 @@ class Enhanced_S3_Media_Upload {
         $this->use_cloudfront = $this->get_option('use_cloudfront', false);
         $this->serve_media_from_cdn = (bool) $this->get_option('serve_media_from_cdn', $this->use_cloudfront);
         $this->serve_static_assets_from_cdn = (bool) $this->get_option('serve_static_assets_from_cdn', false);
-        $this->cloudfront_domain = $this->get_option('cloudfront_domain', '');
+        $this->cloudfront_domain = $this->normalize_cloudfront_domain($this->get_option('cloudfront_domain', ''));
         $this->cloudfront_distribution_id = $this->get_option('cloudfront_distribution_id', '');
         $this->sqs_queue_url = $this->get_option('sqs_queue_url', '');
         $this->auto_delete_local = $this->get_option('auto_delete_local', false);
@@ -207,6 +207,19 @@ class Enhanced_S3_Media_Upload {
         return 'sites/' . $site_name . '/';
     }
 
+    private function normalize_cloudfront_domain($domain) {
+        $domain = trim((string) $domain);
+        if ($domain === '') {
+            return '';
+        }
+
+        $domain = preg_replace('#^https?://#i', '', $domain);
+        $parsed = wp_parse_url('https://' . $domain);
+        $host = is_array($parsed) ? ($parsed['host'] ?? '') : '';
+
+        return strtolower(rtrim(sanitize_text_field($host), '.'));
+    }
+
     private function get_runtime_options() {
         $runtime = $this->options;
         foreach ($this->sensitive_fields as $field) {
@@ -216,6 +229,7 @@ class Enhanced_S3_Media_Upload {
         }
         $runtime['serve_media_from_cdn'] = $this->serve_media_from_cdn;
         $runtime['upload_thumbnails'] = (bool) $this->upload_thumbnails;
+        $runtime['cloudfront_domain'] = $this->cloudfront_domain;
 
         return $runtime;
     }
@@ -2776,8 +2790,23 @@ echo esc_html(wp_json_encode(array(
         if (!current_user_can('manage_options')) {
             wp_send_json_error('Insufficient permissions');
         }
-        
+
         try {
+            if (!empty($_POST['settings']) && is_string($_POST['settings'])) {
+                parse_str(wp_unslash($_POST['settings']), $submitted);
+                if (!empty($submitted['enhanced_s3_settings']) && is_array($submitted['enhanced_s3_settings'])) {
+                    $sanitized_settings = $this->sanitize_settings($submitted['enhanced_s3_settings']);
+                    $this->suppress_settings_reactions = true;
+                    try {
+                        update_option('enhanced_s3_settings', $sanitized_settings);
+                    } finally {
+                        $this->suppress_settings_reactions = false;
+                    }
+                    $this->load_options();
+                    $this->init_aws_components();
+                }
+            }
+
             $result = $this->provision_aws_stack();
             wp_send_json_success($result);
         } catch (Exception $e) {
@@ -3025,6 +3054,17 @@ file_put_contents($temp_file, $test_content);
         if (empty($this->cloudfront_domain)) {
             wp_send_json_error('CloudFront domain not configured');
         }
+
+        if ($this->aws_sdk && !empty($this->cloudfront_distribution_id)) {
+            try {
+                $distribution_status = $this->aws_sdk->get_cloudfront_distribution_status($this->cloudfront_distribution_id);
+                if ($distribution_status !== 'Deployed') {
+                    wp_send_json_error('CloudFront distribution status is ' . $distribution_status . '. Its DNS name may not resolve until AWS reports Deployed; wait a few minutes and test again.');
+                }
+            } catch (Exception $e) {
+                wp_send_json_error('Unable to check CloudFront deployment status: ' . $e->getMessage());
+            }
+        }
         
         try {
             // Test CloudFront domain accessibility
@@ -3041,7 +3081,7 @@ file_put_contents($temp_file, $test_content);
                     wp_send_json_error('CloudFront returned HTTP status: ' . $status_code);
                 }
             } else {
-                wp_send_json_error('CloudFront connection failed: ' . $response->get_error_message());
+                wp_send_json_error('Could not reach ' . $this->cloudfront_domain . ': ' . $response->get_error_message() . ' Verify that this is the distribution hostname (for example, d123abc.cloudfront.net), AWS reports the distribution as Deployed, and the web server can resolve and make HTTPS requests to CloudFront.');
             }
             
         } catch (Exception $e) {
@@ -4814,7 +4854,9 @@ file_put_contents($temp_file, $test_content);
         foreach ($text_fields as $field) {
             if (isset($settings[$field])) {
                 // Save the value even if empty (user might be clearing it)
-                $new_settings[$field] = sanitize_text_field($settings[$field]);
+                $new_settings[$field] = $field === 'cloudfront_domain'
+                    ? $this->normalize_cloudfront_domain($settings[$field])
+                    : sanitize_text_field($settings[$field]);
             } else {
                 // Preserve existing value if not in submitted form
                 $new_settings[$field] = isset($existing_settings[$field]) ? $existing_settings[$field] : '';
@@ -4824,7 +4866,6 @@ file_put_contents($temp_file, $test_content);
         // Sensitive fields (encrypted)
         foreach ($this->sensitive_fields as $field) {
             $incoming = isset($settings[$field]) ? trim($settings[$field]) : '';
-            $masked = isset($settings[$field . '_masked']) && $settings[$field . '_masked'] === '1';
             $clear = isset($settings[$field . '_clear']) && $settings[$field . '_clear'] === '1';
 
             if ($clear) {
@@ -4843,7 +4884,7 @@ file_put_contents($temp_file, $test_content);
                 } else {
                     $new_settings[$field] = $encrypted;
                 }
-            } elseif ($masked && isset($existing_settings[$field])) {
+            } elseif (isset($existing_settings[$field])) {
                 $new_settings[$field] = $existing_settings[$field];
             } else {
                 $new_settings[$field] = '';
