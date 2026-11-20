@@ -3,7 +3,7 @@
  * Plugin Name: FeatherLift Media
  * Plugin URI: https://amagraphs.com
  * Description: Advanced WordPress media upload to Amazon S3 with SQS queue management and automatic bucket/CloudFront creation
- * Version: 1.1.22
+ * Version: 1.1.23
  * Author: Amagraphs
  * Author URI: https://amagraphs.com
  * License: GPL2
@@ -30,7 +30,7 @@ add_filter('cron_schedules', function($schedules) {
 });
 
 class Enhanced_S3_Media_Upload {
-    private $version = '1.1.22';
+    private $version = '1.1.23';
     private $options;
     private $db_version = '2.1.0';
     private $suppress_settings_reactions = false;
@@ -124,7 +124,7 @@ class Enhanced_S3_Media_Upload {
     
     private function init_aws_components() {
         if (!$this->is_configured()) {
-            throw new Exception('AWS credentials are missing or could not be decrypted. Re-enter and save the AWS access key and secret key.');
+            throw new Exception($this->get_aws_credential_error());
         }
 
         $includes_dir = plugin_dir_path(__FILE__) . 'includes/';
@@ -2795,7 +2795,17 @@ echo esc_html(wp_json_encode(array(
             if (!empty($_POST['settings']) && is_string($_POST['settings'])) {
                 parse_str(wp_unslash($_POST['settings']), $submitted);
                 if (!empty($submitted['enhanced_s3_settings']) && is_array($submitted['enhanced_s3_settings'])) {
-                    $sanitized_settings = $this->sanitize_settings($submitted['enhanced_s3_settings']);
+                    $submitted_settings = $submitted['enhanced_s3_settings'];
+                    $sanitized_settings = $this->sanitize_settings($submitted_settings);
+                    foreach (array('access_key', 'secret_key') as $credential_field) {
+                        $incoming_credential = isset($submitted_settings[$credential_field])
+                            ? sanitize_text_field(trim($submitted_settings[$credential_field]))
+                            : '';
+                        if ($incoming_credential !== ''
+                            && $this->decrypt_sensitive_value($sanitized_settings[$credential_field] ?? '') !== $incoming_credential) {
+                            wp_send_json_error('Unable to securely save the submitted AWS ' . ($credential_field === 'access_key' ? 'access key' : 'secret key') . '. Confirm PHP OpenSSL is enabled, then save the credentials again.');
+                        }
+                    }
                     $this->suppress_settings_reactions = true;
                     try {
                         update_option('enhanced_s3_settings', $sanitized_settings);
@@ -2803,6 +2813,9 @@ echo esc_html(wp_json_encode(array(
                         $this->suppress_settings_reactions = false;
                     }
                     $this->load_options();
+                    if (!$this->is_configured()) {
+                        wp_send_json_error($this->get_aws_credential_error());
+                    }
                     $this->init_aws_components();
                 }
             }
@@ -3877,6 +3890,28 @@ file_put_contents($temp_file, $test_content);
             && !empty($this->secret_key)
             && !$secret_key_is_encrypted
             && !empty($this->region);
+    }
+
+    private function get_aws_credential_error() {
+        $stored_access_key = $this->options['access_key'] ?? '';
+        $stored_secret_key = $this->options['secret_key'] ?? '';
+        if (empty($stored_access_key) || empty($stored_secret_key)) {
+            return 'AWS access key and secret key are not both saved. Enter both keys and save the settings.';
+        }
+
+        if (!function_exists('openssl_decrypt') || !function_exists('openssl_encrypt')) {
+            return 'PHP OpenSSL is unavailable, so FeatherLift cannot securely read AWS credentials. Enable the OpenSSL extension, then re-enter and save both keys.';
+        }
+
+        if (empty($this->access_key) || empty($this->secret_key)) {
+            return 'Saved AWS credentials cannot be decrypted. Re-enter and save both keys. If the site was migrated or restored, also restore the option enhanced_s3_secret_encryption_key from the same backup.';
+        }
+
+        if (empty($this->region)) {
+            return 'AWS region is missing. Select a region and save the settings.';
+        }
+
+        return 'AWS credentials are unavailable. Re-enter and save the access key and secret key.';
     }
     
     private function get_s3_endpoint($region) {
